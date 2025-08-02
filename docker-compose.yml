@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  # Сервис нашего бота
+  bot:
+    build: .
+    env_file: .env # Подключаем файл с переменными окружения
+    restart: always # Всегда перезапускать, если упадет
+    depends_on:
+      - db # Запускать только после того, как запустится сервис 'db'
+
+  # Сервис базы данных PostgreSQL
+  db:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/ # Сохраняем данные БД между перезапусками
+    restart: always
+
+volumes:
+  postgres_data:
