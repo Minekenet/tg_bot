@@ -10,13 +10,13 @@ from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.utils.localization import get_text
-# [ИЗМЕНЕНО] Импортируем новый стейт
 from bot.utils.states import ScenarioCreation, ScenarioEditing
+from bot.utils.validation import sanitize_text, is_valid_name, is_valid_keyword
 from bot.keyboards.inline import (
     get_scenarios_menu_keyboard, get_source_selection_keyboard, 
     get_media_strategy_keyboard, get_manage_scenario_keyboard, get_confirmation_keyboard,
     get_posting_mode_keyboard, get_add_item_keyboard, get_created_scenario_nav_keyboard,
-    get_scenario_edit_keyboard # [НОВОЕ]
+    get_scenario_edit_keyboard
 )
 from bot.utils.scheduler import add_job_to_scheduler, remove_job_from_scheduler, process_scenario_job
 
@@ -26,7 +26,7 @@ async def get_user_language(user_id: int, db_pool: asyncpg.Pool) -> str:
     async with db_pool.acquire() as connection:
         return await connection.fetchval("SELECT language_code FROM users WHERE user_id = $1", user_id) or 'ru'
 
-# --- Вход в меню сценариев ---
+# --- Вход в меню сценариев (ПОЛНОСТЬЮ ПЕРЕРАБОТАН КАК "ПРИВРАТНИК") ---
 @router.callback_query(F.data.startswith("scenarios_menu_"))
 async def scenarios_menu_handler(callback: CallbackQuery, db_pool: asyncpg.Pool):
     channel_id = int(callback.data.split("_")[-1])
@@ -38,29 +38,36 @@ async def scenarios_menu_handler(callback: CallbackQuery, db_pool: asyncpg.Pool)
             channel_id
         )
 
+    # Проверяем наличие всех необходимых настроек
     passport_ok = bool(channel_info['style_passport'])
     description_ok = bool(channel_info['activity_description'])
     language_ok = bool(channel_info['generation_language'])
 
     if passport_ok and description_ok and language_ok:
+        # Если все готово, показываем стандартное меню
         text = get_text(lang_code, 'scenarios_menu_title', channel_name=channel_info['channel_name'])
         keyboard = await get_scenarios_menu_keyboard(channel_id, lang_code, db_pool)
         await callback.message.edit_text(text, reply_markup=keyboard.as_markup())
     else:
+        # Если чего-то не хватает, показываем "меню подготовки"
         builder = InlineKeyboardBuilder()
         text = get_text(lang_code, 'scenarios_prerequisites_header') + "\n\n"
-        status_icon_ok = "✅"
-        status_icon_fail = "❌"
 
-        text += f"{status_icon_ok if passport_ok else status_icon_fail} {get_text(lang_code, 'prerequisite_passport')}\n"
+        # Паспорт стиля
+        status_icon = "✅" if passport_ok else "❌"
+        text += f"{status_icon} {get_text(lang_code, 'prerequisite_passport')}\n"
         if not passport_ok:
             builder.row(InlineKeyboardButton(text=get_text(lang_code, 'setup_passport_button'), callback_data=f"channel_passport_{channel_id}"))
 
-        text += f"{status_icon_ok if description_ok else status_icon_fail} {get_text(lang_code, 'prerequisite_description')}\n"
+        # Описание деятельности
+        status_icon = "✅" if description_ok else "❌"
+        text += f"{status_icon} {get_text(lang_code, 'prerequisite_description')}\n"
         if not description_ok:
             builder.row(InlineKeyboardButton(text=get_text(lang_code, 'setup_description_button'), callback_data=f"channel_description_{channel_id}"))
 
-        text += f"{status_icon_ok if language_ok else status_icon_fail} {get_text(lang_code, 'prerequisite_language')}\n"
+        # Язык генерации
+        status_icon = "✅" if language_ok else "❌"
+        text += f"{status_icon} {get_text(lang_code, 'prerequisite_language')}\n"
         if not language_ok:
             builder.row(InlineKeyboardButton(text=get_text(lang_code, 'setup_language_button'), callback_data=f"channel_language_{channel_id}"))
 
@@ -70,11 +77,7 @@ async def scenarios_menu_handler(callback: CallbackQuery, db_pool: asyncpg.Pool)
 
     await callback.answer()
 
-
-# --- FSM СОЗДАНИЯ СЦЕНАРИЯ (без изменений) ---
-# ... (весь код создания сценария от `start_scenario_creation` до `process_timezone_and_save` остается здесь без изменений) ...
-
-# ШАГ 1: Имя
+# --- FSM СОЗДАНИЯ СЦЕНАРИЯ ---
 @router.callback_query(F.data.startswith("scenario_create_"))
 async def start_scenario_creation(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
     channel_id = int(callback.data.split("_")[-1])
@@ -87,7 +90,13 @@ async def start_scenario_creation(callback: CallbackQuery, state: FSMContext, db
 @router.message(ScenarioCreation.waiting_for_name)
 async def process_scenario_name(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
     lang_code = await get_user_language(message.from_user.id, db_pool)
-    await state.update_data(name=message.text)
+    
+    scenario_name = sanitize_text(message.text)
+    if not is_valid_name(scenario_name):
+        await message.reply(get_text(lang_code, 'invalid_name_error'))
+        return
+
+    await state.update_data(name=scenario_name)
     await state.set_state(ScenarioCreation.adding_keywords)
     keyboard = get_add_item_keyboard(lang_code, "keywords")
     msg = await message.answer(get_text(lang_code, 'enter_keywords_prompt_list', keywords_list=""), reply_markup=keyboard, parse_mode="HTML")
@@ -98,10 +107,16 @@ async def process_keyword_addition(message: Message, state: FSMContext, bot: Bot
     lang_code = await get_user_language(message.from_user.id, db_pool)
     data = await state.get_data()
     keywords = data.get('keywords', [])
-    new_keyword = message.text.strip()
+    
+    new_keyword = sanitize_text(message.text)
+    if not is_valid_keyword(new_keyword):
+        await message.delete()
+        return
+
     if new_keyword and new_keyword not in keywords:
         keywords.append(new_keyword)
         await state.update_data(keywords=keywords)
+        
     await message.delete()
     keywords_list_str = "\n".join([f"• {kw}" for kw in keywords])
     keyboard = get_add_item_keyboard(lang_code, "keywords")
@@ -243,7 +258,6 @@ async def process_timezone_and_save(message: Message, state: FSMContext, db_pool
 
 @router.callback_query(F.data.startswith("scenario_manage_"))
 async def manage_scenario_handler(callback: CallbackQuery, db_pool: asyncpg.Pool, state: FSMContext):
-    # [ИЗМЕНЕНО] Чистим стейт на случай, если пользователь вышел из редактирования
     await state.clear()
     scenario_id = int(callback.data.split("_")[-1])
     lang_code = await get_user_language(callback.from_user.id, db_pool)
@@ -262,37 +276,30 @@ async def manage_scenario_handler(callback: CallbackQuery, db_pool: asyncpg.Pool
     )
     await callback.answer()
 
-# --- [НОВОЕ] Логика приостановки/возобновления сценария ---
 @router.callback_query(F.data.startswith("scenario_toggle_active_"))
 async def toggle_scenario_activity(callback: CallbackQuery, db_pool: asyncpg.Pool, scheduler: AsyncIOScheduler):
     scenario_id = int(callback.data.split("_")[-1])
     lang_code = await get_user_language(callback.from_user.id, db_pool)
 
     async with db_pool.acquire() as conn:
-        # Получаем текущий статус и инвертируем его
         current_scenario = await conn.fetchrow("SELECT * FROM posting_scenarios WHERE id = $1", scenario_id)
         new_status = not current_scenario['is_active']
         
         await conn.execute("UPDATE posting_scenarios SET is_active = $1 WHERE id = $2", new_status, scenario_id)
 
     if new_status:
-        # Если возобновили, добавляем задачи в планировщик
         add_job_to_scheduler(scheduler, dict(current_scenario))
         await callback.answer(get_text(lang_code, 'scenario_resumed'), show_alert=True)
     else:
-        # Если поставили на паузу, удаляем задачи
         remove_job_from_scheduler(scheduler, dict(current_scenario))
         await callback.answer(get_text(lang_code, 'scenario_paused'), show_alert=True)
     
-    # Обновляем меню управления, чтобы показать новый статус
     await manage_scenario_handler(callback, db_pool, FSMContext(storage=router.storage, key=callback.message.chat.id, bot=callback.bot))
 
-
-# --- [НОВОЕ] FSM для редактирования сценария ---
+# --- FSM для редактирования сценария ---
 
 @router.callback_query(F.data.startswith("scenario_edit_"))
 async def edit_scenario_entry(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
-    """Входная точка в меню редактирования сценария."""
     scenario_id = int(callback.data.split("_")[-1])
     lang_code = await get_user_language(callback.from_user.id, db_pool)
 
@@ -300,7 +307,6 @@ async def edit_scenario_entry(callback: CallbackQuery, state: FSMContext, db_poo
         scenario = await conn.fetchrow("SELECT * FROM posting_scenarios WHERE id = $1", scenario_id)
 
     await state.set_state(ScenarioEditing.choosing_option)
-    # Сохраняем все данные о сценарии в стейт для быстрого доступа
     await state.update_data(scenario=dict(scenario))
     
     keyboard = get_scenario_edit_keyboard(scenario_id, lang_code)
@@ -310,7 +316,6 @@ async def edit_scenario_entry(callback: CallbackQuery, state: FSMContext, db_poo
     )
     await callback.answer()
 
-# Редактирование имени
 @router.callback_query(F.data.startswith("s_edit_name_"), ScenarioEditing.choosing_option)
 async def edit_scenario_name_prompt(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
     lang_code = await get_user_language(callback.from_user.id, db_pool)
@@ -322,7 +327,11 @@ async def edit_scenario_name_prompt(callback: CallbackQuery, state: FSMContext, 
 async def process_new_scenario_name(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
     data = await state.get_data()
     scenario_id = data['scenario']['id']
-    new_name = message.text.strip()
+    
+    new_name = sanitize_text(message.text)
+    if not is_valid_name(new_name):
+        await message.reply(get_text(lang_code, 'invalid_name_error'))
+        return
     
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE posting_scenarios SET scenario_name = $1 WHERE id = $2", new_name, scenario_id)
@@ -330,17 +339,14 @@ async def process_new_scenario_name(message: Message, state: FSMContext, db_pool
     lang_code = await get_user_language(message.from_user.id, db_pool)
     await message.answer(get_text(lang_code, 'scenario_name_updated'))
     
-    # Возвращаемся в меню управления
     cb_mock = CallbackQuery(id="mock", from_user=message.from_user, chat_instance="mock", message=message, data=f"scenario_manage_{scenario_id}")
     await manage_scenario_handler(cb_mock, db_pool, state)
 
-# Редактирование времени (самый сложный кейс)
 @router.callback_query(F.data.startswith("s_edit_times_"), ScenarioEditing.choosing_option)
 async def edit_scenario_times_prompt(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
     lang_code = await get_user_language(callback.from_user.id, db_pool)
     data = await state.get_data()
     
-    # Обновляем `run_times` в стейте из данных сценария
     current_times = data['scenario']['run_times'].split(',') if data['scenario']['run_times'] else []
     await state.update_data(run_times=current_times)
     
@@ -392,15 +398,12 @@ async def process_times_edit_done(callback: CallbackQuery, state: FSMContext, db
     new_times_str = ",".join(data['run_times'])
 
     async with db_pool.acquire() as conn:
-        # Сначала удаляем старые задачи
         old_scenario = await conn.fetchrow("SELECT * FROM posting_scenarios WHERE id = $1", scenario_id)
         if old_scenario['is_active']:
             remove_job_from_scheduler(scheduler, dict(old_scenario))
         
-        # Обновляем время в БД
         await conn.execute("UPDATE posting_scenarios SET run_times = $1 WHERE id = $2", new_times_str, scenario_id)
 
-        # Добавляем новые задачи, если сценарий активен
         new_scenario = await conn.fetchrow("SELECT * FROM posting_scenarios WHERE id = $1", scenario_id)
         if new_scenario['is_active']:
             add_job_to_scheduler(scheduler, dict(new_scenario))
@@ -408,13 +411,9 @@ async def process_times_edit_done(callback: CallbackQuery, state: FSMContext, db
     await callback.message.edit_text(get_text(lang_code, 'scenario_times_updated'))
     await callback.answer()
     
-    # Возвращаемся в меню управления
     await manage_scenario_handler(callback, db_pool, state)
 
-
 # --- ОСТАЛЬНЫЕ ФУНКЦИИ УПРАВЛЕНИЯ ---
-# (run_scenario_now, delete_scenario, moderation handlers)
-
 @router.callback_query(F.data.startswith("scenario_run_now_"))
 async def run_scenario_now_handler(callback: CallbackQuery, db_pool: asyncpg.Pool, scheduler: AsyncIOScheduler):
     scenario_id = int(callback.data.split("_")[-1])
@@ -460,7 +459,6 @@ async def delete_scenario_confirm(callback: CallbackQuery, db_pool: asyncpg.Pool
         await callback.answer("Scenario was already deleted.", show_alert=True)
 
 # --- МОДЕРАЦИЯ ---
-
 @router.callback_query(F.data.startswith("moderation_publish_"))
 async def moderation_publish_handler(callback: CallbackQuery, bot: Bot, db_pool: asyncpg.Pool):
     channel_id = int(callback.data.split("_")[-1])

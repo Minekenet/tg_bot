@@ -1,28 +1,32 @@
 import datetime
+import re
+import logging
 import asyncpg
 from aiogram import Router, F, Bot, types
+from aiogram.filters import StateFilter
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.utils.states import FolderCreation, ChannelStylePassportCreation, ChannelDescription, ChannelLanguage
+from bot.utils.states import FolderCreation, ChannelStylePassportCreation, ChannelDescription, ChannelLanguage, AddChannel, Onboarding
 from bot.utils.localization import get_text
+from bot.utils.validation import sanitize_text, is_valid_name, is_valid_description
 from bot.keyboards.inline import (
     get_channels_keyboard, get_folder_view_keyboard, get_channel_manage_keyboard,
-    get_channel_move_keyboard, get_confirmation_keyboard, get_style_passport_creation_keyboard
+    get_channel_move_keyboard, get_confirmation_keyboard, get_style_passport_creation_keyboard,
+    get_onboarding_after_channel_keyboard, get_cancel_add_channel_keyboard
 )
 from bot.utils.ai_generator import generate_style_passport_from_text
 
 router = Router()
 
-# --- Константы ---
+# --- Константы и вспомогательные функции ---
 MAX_POSTS_FOR_PASSPORT = 10
 MAX_CHARS_FOR_PASSPORT = 10000
 MAX_CHARS_FOR_DESCRIPTION = 2000
 PASSPORT_UPDATE_COOLDOWN = datetime.timedelta(days=3)
 
-# --- Вспомогательные функции ---
 async def get_user_language(user_id: int, db_pool: asyncpg.Pool) -> str:
     if db_pool:
         async with db_pool.acquire() as connection:
@@ -41,6 +45,121 @@ async def show_channels_menu(message: Message | CallbackQuery, db_pool: asyncpg.
             await message.answer(text, reply_markup=keyboard)
     except TelegramBadRequest:
         pass
+
+async def manage_channel_by_id(message: Message, db_pool: asyncpg.Pool, channel_id: int):
+    lang_code = await get_user_language(message.from_user.id, db_pool)
+    async with db_pool.acquire() as conn:
+        channel_name = await conn.fetchval("SELECT channel_name FROM channels WHERE channel_id = $1", channel_id)
+    
+    keyboard = await get_channel_manage_keyboard(channel_id, lang_code, db_pool)
+    await message.answer(get_text(lang_code, 'manage_channel_title', channel_name=channel_name), reply_markup=keyboard)
+
+# --- [ЕДИНАЯ ЛОГИКА ДОБАВЛЕНИЯ КАНАЛА] ---
+async def _add_channel_logic(message: Message, bot: Bot, db_pool: asyncpg.Pool, state: FSMContext, channel_id: int | str) -> bool:
+    lang_code = await get_user_language(message.from_user.id, db_pool)
+    user_id = message.from_user.id
+    current_state_str = await state.get_state()
+    is_onboarding = current_state_str == AddChannel.waiting_for_input
+
+    try:
+        chat_info = await bot.get_chat(channel_id)
+        if chat_info.type != 'channel':
+            await message.reply(get_text(lang_code, 'forward_from_channel_required'))
+            return False
+
+        member = await bot.get_chat_member(chat_info.id, user_id)
+        if not isinstance(member, (types.ChatMemberOwner, types.ChatMemberAdministrator)):
+            await message.reply(get_text(lang_code, 'user_not_admin_error'))
+            return False
+
+        bot_member = await bot.get_chat_member(chat_info.id, bot.id)
+        if not isinstance(bot_member, (types.ChatMemberOwner, types.ChatMemberAdministrator)):
+            raise PermissionError("Not admin")
+        if isinstance(bot_member, types.ChatMemberAdministrator) and not bot_member.can_post_messages:
+            raise PermissionError("No post messages permission")
+
+        async with db_pool.acquire() as connection:
+            await connection.execute(
+                "INSERT INTO channels (channel_id, channel_name, owner_id) VALUES ($1, $2, $3) "
+                "ON CONFLICT (channel_id) DO UPDATE SET channel_name = EXCLUDED.channel_name, owner_id = EXCLUDED.owner_id;",
+                chat_info.id, chat_info.title, user_id
+            )
+        
+        await message.reply(get_text(lang_code, 'channel_added_success', channel_title=chat_info.title))
+        
+        if is_onboarding:
+            await state.set_state(Onboarding.waiting_for_passport)
+            await state.update_data(channel_id=chat_info.id)
+            keyboard = get_onboarding_after_channel_keyboard(lang_code, chat_info.id)
+            await message.answer(
+                get_text(lang_code, 'onboarding_step2_passport'),
+                reply_markup=keyboard
+            )
+        else:
+            await state.clear()
+            await show_channels_menu(message, db_pool)
+        
+        return True
+
+    except TelegramBadRequest:
+        await message.reply(get_text(lang_code, 'channel_not_found_error'))
+        return False
+    except PermissionError as e:
+        if str(e) == "Not admin": await message.reply(get_text(lang_code, 'bot_not_admin_error'))
+        elif str(e) == "No post messages permission": await message.reply(get_text(lang_code, 'bot_no_post_permission_error'))
+        return False
+    except Exception as e:
+        logging.error(f"Неизвестная ошибка при добавлении канала: {e}", exc_info=True)
+        await message.reply(get_text(lang_code, 'generic_error'))
+        return False
+
+# --- [ЕДИНЫЙ ПРОЦЕСС ДОБАВЛЕНИЯ КАНАЛА] ---
+
+# Шаг 1: Пользователь нажимает кнопку "Добавить канал"
+@router.callback_query(F.data == "add_channel_start")
+async def start_add_channel_process(callback: CallbackQuery, state: FSMContext):
+    lang_code = await get_user_language(callback.from_user.id, state.storage)
+    await state.set_state(AddChannel.waiting_for_input)
+    keyboard = get_cancel_add_channel_keyboard(lang_code)
+    await callback.message.edit_text(get_text(lang_code, 'add_channel_unified_prompt'), reply_markup=keyboard)
+    await callback.answer()
+
+# Шаг 2: Пользователь отправляет что-либо (пересылку или текст)
+@router.message(AddChannel.waiting_for_input)
+async def process_any_input_for_channel(message: Message, bot: Bot, db_pool: asyncpg.Pool, state: FSMContext):
+    # Вариант А: Пересланное сообщение
+    if message.forward_from_chat and message.forward_from_chat.type == 'channel':
+        await _add_channel_logic(message, bot, db_pool, state, message.forward_from_chat.id)
+        return
+
+    # Вариант Б: Текст (ссылка, юзернейм или ID)
+    if message.text:
+        text_input = message.text.strip()
+        target_id: str | int
+        
+        if text_input.startswith("-100") and text_input[1:].isdigit() and len(text_input) > 13:
+            target_id = int(text_input)
+        elif text_input.startswith(('https://t.me/', '@', 't.me/')):
+            target_id = text_input
+        else:
+            lang_code = await get_user_language(message.from_user.id, db_pool)
+            await message.reply(get_text(lang_code, 'invalid_channel_id_error'))
+            return
+        
+        await _add_channel_logic(message, bot, db_pool, state, target_id)
+        return
+
+    # Если прислали не текст и не пересылку (например, фото)
+    lang_code = await get_user_language(message.from_user.id, db_pool)
+    await message.reply(get_text(lang_code, 'invalid_channel_id_error'))
+
+# Шаг 3: Пользователь нажимает "Отмена"
+@router.callback_query(AddChannel.waiting_for_input, F.data == "cancel_add_channel")
+async def cancel_add_channel_process(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
+    await state.clear()
+    await callback.answer()
+    await show_channels_menu(callback, db_pool)
+
 
 # --- ОБРАБОТЧИКИ МЕНЮ КАНАЛОВ, ПАГИНАЦИИ, ПАПОК, ПЕРЕМЕЩЕНИЯ ---
 
@@ -185,6 +304,12 @@ async def channel_delete_confirm_handler(callback: CallbackQuery, db_pool: async
 
 # --- БЛОК УПРАВЛЕНИЯ ПАСПОРТОМ СТИЛЯ ---
 
+@router.callback_query(F.data.startswith("channel_passport_create_"))
+async def start_style_passport_creation_entry(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
+    channel_id = int(callback.data.split("_")[3])
+    lang_code = await get_user_language(callback.from_user.id, db_pool)
+    await start_style_passport_creation(callback, state, channel_id, lang_code)
+
 @router.callback_query(F.data.startswith("channel_passport_"))
 async def manage_style_passport(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
     channel_id = int(callback.data.split("_")[2])
@@ -224,19 +349,13 @@ async def manage_style_passport(callback: CallbackQuery, state: FSMContext, db_p
     else:
         await start_style_passport_creation(callback, state, channel_id, lang_code)
 
-@router.callback_query(F.data.startswith("channel_passport_create_"))
-async def start_style_passport_creation_entry(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
-    channel_id = int(callback.data.split("_")[3])
-    lang_code = await get_user_language(callback.from_user.id, db_pool)
-    await start_style_passport_creation(callback, state, channel_id, lang_code)
-
 async def start_style_passport_creation(callback: CallbackQuery, state: FSMContext, channel_id: int, lang_code: str):
     await state.set_state(ChannelStylePassportCreation.collecting_posts)
     await state.update_data(posts=[], char_count=0, channel_id=channel_id)
 
     keyboard = get_style_passport_creation_keyboard(lang_code)
     text = get_text(lang_code, 'no_style_passport_yet') + "\n\n" + \
-           get_text(lang_code, 'style_passport_creation_intro', post_count=0, char_count=0, max_chars=MAX_POSTS_FOR_PASSPORT)
+           get_text(lang_code, 'style_passport_creation_intro', post_count=0, char_count=0, max_chars=MAX_CHARS_FOR_PASSPORT)
     
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
@@ -274,10 +393,9 @@ async def process_style_passport(callback: CallbackQuery, state: FSMContext, db_
     data = await state.get_data()
     channel_id = data.get('channel_id')
     
-    await state.clear()
-
     posts_text = "\n\n---\n\n".join(data.get('posts', []))
     if not posts_text:
+        await state.clear()
         await callback.message.edit_text(get_text(lang_code, 'style_passport_creation_cancelled'))
         await callback.answer("Вы не отправили ни одного поста для анализа.", show_alert=True)
         return
@@ -300,6 +418,16 @@ async def process_style_passport(callback: CallbackQuery, state: FSMContext, db_
         await callback.message.edit_text(f"Произошла ошибка при создании паспорта: {passport_text}")
     
     await callback.answer()
+    
+    current_onboarding_state = await state.get_state()
+    if current_onboarding_state == Onboarding.waiting_for_passport:
+        # TODO: Завершить онбординг, перейдя к шагу с описанием
+        await state.clear() # Временная заглушка
+        await manage_channel_by_id(callback.message, db_pool, channel_id)
+    else:
+        await state.clear()
+        await manage_channel_by_id(callback.message, db_pool, channel_id)
+
 
 @router.callback_query(ChannelStylePassportCreation.collecting_posts, F.data == "style_passport_cancel")
 async def cancel_style_passport_creation(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
@@ -356,10 +484,10 @@ async def process_activity_description(message: Message, state: FSMContext, db_p
     lang_code = await get_user_language(message.from_user.id, db_pool)
     data = await state.get_data()
     channel_id = data.get('channel_id')
-    description_text = message.text or ""
-
-    if len(description_text) > MAX_CHARS_FOR_DESCRIPTION:
-        await message.reply(get_text(lang_code, 'char_limit_exceeded', max_chars=MAX_CHARS_FOR_DESCRIPTION))
+    
+    description_text = sanitize_text(message.text)
+    if not is_valid_description(description_text):
+        await message.reply(get_text(lang_code, 'description_too_long_error', max_chars=MAX_CHARS_FOR_DESCRIPTION))
         return
 
     async with db_pool.acquire() as conn:
@@ -372,14 +500,6 @@ async def process_activity_description(message: Message, state: FSMContext, db_p
     await message.reply(get_text(lang_code, 'activity_description_saved'))
     
     await manage_channel_by_id(message, db_pool, channel_id)
-
-async def manage_channel_by_id(message: Message, db_pool: asyncpg.Pool, channel_id: int):
-    lang_code = await get_user_language(message.from_user.id, db_pool)
-    async with db_pool.acquire() as conn:
-        channel_name = await conn.fetchval("SELECT channel_name FROM channels WHERE channel_id = $1", channel_id)
-    
-    keyboard = await get_channel_manage_keyboard(channel_id, lang_code, db_pool)
-    await message.answer(get_text(lang_code, 'manage_channel_title', channel_name=channel_name), reply_markup=keyboard)
 
 # --- БЛОК УПРАВЛЕНИЯ ЯЗЫКОМ ГЕНЕРАЦИИ ---
 
@@ -413,8 +533,12 @@ async def manage_generation_language(callback: CallbackQuery, state: FSMContext,
 async def set_generation_language(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
     data = await state.get_data()
     channel_id = data.get('channel_id')
-    new_lang = message.text.strip()
+    new_lang = sanitize_text(message.text)
     lang_code = await get_user_language(message.from_user.id, db_pool)
+
+    if not new_lang or len(new_lang) > 50:
+        await message.reply("Некорректное название языка.")
+        return
 
     async with db_pool.acquire() as conn:
         await conn.execute(
@@ -427,56 +551,7 @@ async def set_generation_language(message: Message, state: FSMContext, db_pool: 
     
     await manage_channel_by_id(message, db_pool, channel_id)
 
-# --- ЛОГИКА ДОБАВЛЕНИЯ КАНАЛА И СОЗДАНИЯ ПАПКИ ---
-
-@router.callback_query(F.data == "add_channel")
-async def add_channel_callback(callback: CallbackQuery, db_pool: asyncpg.Pool):
-    lang_code = await get_user_language(callback.from_user.id, db_pool)
-    
-    # --- ИЗМЕНЕНИЕ ЗДЕСЬ: ДОБАВЛЯЕМ КНОПКУ "ОТМЕНА" ---
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(
-        text=get_text(lang_code, 'cancel_button'),
-        callback_data="my_channels_menu" # Возврат в меню каналов
-    ))
-    
-    await callback.message.edit_text(
-        get_text(lang_code, 'add_channel_prompt'),
-        reply_markup=builder.as_markup()
-    )
-    await callback.answer()
-
-@router.message(F.forward_from_chat)
-async def forwarded_message_handler(message: Message, bot: Bot, db_pool: asyncpg.Pool):
-    lang_code = await get_user_language(message.from_user.id, db_pool)
-    fwd_chat = message.forward_from_chat
-
-    if fwd_chat.type != 'channel':
-        await message.reply(get_text(lang_code, 'forward_from_channel_required'))
-        return
-
-    try:
-        member = await bot.get_chat_member(fwd_chat.id, bot.id)
-        if not isinstance(member, (types.ChatMemberOwner, types.ChatMemberAdministrator)):
-            raise PermissionError("Not admin")
-        if isinstance(member, types.ChatMemberAdministrator) and not member.can_post_messages:
-            raise PermissionError("No post messages permission")
-
-        async with db_pool.acquire() as connection:
-            await connection.execute(
-                "INSERT INTO channels (channel_id, channel_name, owner_id) VALUES ($1, $2, $3) "
-                "ON CONFLICT (channel_id) DO UPDATE SET channel_name = EXCLUDED.channel_name, owner_id = EXCLUDED.owner_id;",
-                fwd_chat.id, fwd_chat.title, message.from_user.id
-            )
-        
-        await message.reply(get_text(lang_code, 'channel_added_success', channel_title=fwd_chat.title))
-        await show_channels_menu(message, db_pool)
-
-    except PermissionError as e:
-        if str(e) == "Not admin": await message.reply(get_text(lang_code, 'bot_not_admin_error'))
-        elif str(e) == "No post messages permission": await message.reply(get_text(lang_code, 'bot_no_post_permission_error'))
-    except Exception:
-        await message.reply(get_text(lang_code, 'generic_error'))
+# --- ЛОГИКА СОЗДАНИЯ ПАПКИ ---
 
 @router.callback_query(F.data == "create_folder")
 async def create_folder_callback(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
@@ -489,7 +564,12 @@ async def create_folder_callback(callback: CallbackQuery, state: FSMContext, db_
 async def folder_name_handler(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
     await state.clear()
     lang_code = await get_user_language(message.from_user.id, db_pool)
-    folder_name = message.text.strip()
+    
+    folder_name = sanitize_text(message.text)
+    if not is_valid_name(folder_name):
+        await message.reply(get_text(lang_code, 'invalid_name_error'))
+        await show_channels_menu(message, db_pool)
+        return
     
     try:
         async with db_pool.acquire() as connection:

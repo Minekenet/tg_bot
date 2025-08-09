@@ -35,3 +35,12 @@ class ChannelLanguage(StatesGroup):
 class SupportRequest(StatesGroup):
     waiting_for_message = State()
     waiting_for_reply_from_admin = State()
+
+class Onboarding(StatesGroup):
+    waiting_for_channel = State()
+    waiting_for_passport = State()
+    waiting_for_description = State()
+    waiting_for_language = State()
+
+class AddChannel(StatesGroup):
+    waiting_for_input = State()

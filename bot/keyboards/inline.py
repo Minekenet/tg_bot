@@ -62,10 +62,18 @@ async def get_channels_keyboard(user_id: int, lang_code: str, db_pool: asyncpg.P
         if nav_buttons:
             builder.row(*nav_buttons)
 
-    builder.row(InlineKeyboardButton(text=get_text(lang_code, 'add_channel_button'), callback_data="add_channel"))
+    builder.row(InlineKeyboardButton(text=get_text(lang_code, 'add_channel_button'), callback_data="add_channel_start"))
     builder.row(InlineKeyboardButton(text=get_text(lang_code, 'create_folder_button'), callback_data="create_folder"))
     builder.row(InlineKeyboardButton(text=get_text(lang_code, 'back_to_main_menu_button'), callback_data="back_to_main_menu"))
     
+    return builder.as_markup()
+
+def get_cancel_add_channel_keyboard(lang_code: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text=get_text(lang_code, 'cancel_button'),
+        callback_data="cancel_add_channel"
+    ))
     return builder.as_markup()
 
 async def get_folder_view_keyboard(folder_id: int, user_id: int, lang_code: str, db_pool: asyncpg.Pool) -> InlineKeyboardMarkup:
@@ -185,7 +193,6 @@ async def get_scenarios_menu_keyboard(channel_id: int, lang_code: str, db_pool: 
     async with db_pool.acquire() as conn:
         scenarios = await conn.fetch("SELECT id, scenario_name, is_active FROM posting_scenarios WHERE channel_id = $1 ORDER BY scenario_name", channel_id)
         for scenario in scenarios:
-            # [ИЗМЕНЕНО] Добавляем иконку статуса
             status_icon = "▶️" if scenario['is_active'] else "⏸️"
             builder.row(InlineKeyboardButton(
                 text=f"{status_icon} {scenario['scenario_name']}",
@@ -226,14 +233,12 @@ def get_media_strategy_keyboard(lang_code: str) -> InlineKeyboardMarkup:
         builder.row(InlineKeyboardButton(text=text, callback_data=f"media_strategy_{key}"))
     return builder.as_markup()
 
-# [ИЗМЕНЕНО] Функция стала асинхронной для доступа к БД
 async def get_manage_scenario_keyboard(scenario_id: int, lang_code: str, db_pool: asyncpg.Pool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
     async with db_pool.acquire() as conn:
         scenario = await conn.fetchrow("SELECT is_active FROM posting_scenarios WHERE id = $1", scenario_id)
 
-    # Динамическая кнопка Пауза/Возобновить
     if scenario['is_active']:
         builder.row(InlineKeyboardButton(
             text=get_text(lang_code, 'pause_scenario_button'),
@@ -261,19 +266,14 @@ async def get_manage_scenario_keyboard(scenario_id: int, lang_code: str, db_pool
     ))
     return builder.as_markup()
 
-# --- [НОВОЕ] ---
 def get_scenario_edit_keyboard(scenario_id: int, lang_code: str) -> InlineKeyboardMarkup:
-    """Клавиатура для выбора поля сценария для редактирования."""
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="📝 Название", callback_data=f"s_edit_name_{scenario_id}"))
     builder.row(InlineKeyboardButton(text="🔑 Ключевые слова", callback_data=f"s_edit_keywords_{scenario_id}"))
-    # Для простоты, некоторые опции можно сгруппировать или опустить
-    # builder.row(InlineKeyboardButton(text="Источники", callback_data=f"s_edit_sources_{scenario_id}"))
     builder.row(InlineKeyboardButton(text="⏰ Время запуска", callback_data=f"s_edit_times_{scenario_id}"))
     builder.row(InlineKeyboardButton(text="🌍 Часовой пояс", callback_data=f"s_edit_timezone_{scenario_id}"))
     builder.row(InlineKeyboardButton(text="⬅️ Назад к управлению", callback_data=f"scenario_manage_{scenario_id}"))
     return builder.as_markup()
-
 
 def get_posting_mode_keyboard(lang_code: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -302,7 +302,6 @@ def get_moderation_keyboard(lang_code: str, channel_id: int) -> InlineKeyboardMa
     return builder.as_markup()
 
 def get_add_item_keyboard(lang_code: str, action_prefix: str) -> InlineKeyboardMarkup:
-    """Создает клавиатуру с кнопкой 'Готово'."""
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(
         text=get_text(lang_code, 'button_done_selection'),
@@ -311,10 +310,29 @@ def get_add_item_keyboard(lang_code: str, action_prefix: str) -> InlineKeyboardM
     return builder.as_markup()
 
 def get_created_scenario_nav_keyboard(lang_code: str, scenario_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура после создания сценария."""
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(
         text=get_text(lang_code, 'go_to_scenario_settings_button'),
         callback_data=f"scenario_manage_{scenario_id}"
+    ))
+    return builder.as_markup()
+
+def get_onboarding_skip_keyboard(lang_code: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text=get_text(lang_code, 'onboarding_skip_button'),
+        callback_data="skip_onboarding"
+    ))
+    return builder.as_markup()
+
+def get_onboarding_after_channel_keyboard(lang_code: str, channel_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text=get_text(lang_code, 'onboarding_create_passport_button'),
+        callback_data=f"channel_passport_create_{channel_id}"
+    ))
+    builder.row(InlineKeyboardButton(
+        text=get_text(lang_code, 'onboarding_skip_button'),
+        callback_data="skip_onboarding"
     ))
     return builder.as_markup()

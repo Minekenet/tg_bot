@@ -1,18 +1,45 @@
 import asyncio
 import logging
-import asyncpg
+import logging.handlers
+import os
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+import asyncpg
 
-# Импортируем наш централизованный конфиг
 from bot import config
-
-# Импортируем все роутеры
 from bot.handlers import start, channels, subscription, scenarios, admin, support
-
-# Импортируем утилиты и middleware
 from bot.utils.scheduler import setup_scheduler
 from bot.middlewares.throttling import ThrottlingMiddleware
+from bot.utils.telegram_logger import TelegramLogsHandler
+
+def setup_logging():
+    """Настраивает систему логирования для записи в файлы и отправки в Telegram."""
+    log_format = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+    
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format=log_format
+    )
+
+    logger = logging.getLogger()
+
+    file_handler = logging.handlers.TimedRotatingFileHandler(
+        'logs/bot.log', when='D', interval=1, backupCount=7, encoding='utf-8'
+    )
+    file_handler.setFormatter(logging.Formatter(log_format))
+    logger.addHandler(file_handler)
+
+    if config.ADMINS:
+        telegram_handler = TelegramLogsHandler(bot_token=config.BOT_TOKEN, chat_id=config.ADMINS[0])
+        telegram_handler.setLevel(logging.ERROR)
+        telegram_handler.setFormatter(logging.Formatter(f"<b>Bot Alert!</b>\n<pre>{log_format}</pre>"))
+        logger.addHandler(telegram_handler)
+
+    logging.info("Logging system configured.")
+
 
 async def create_db_connection_pool():
     """Создает пул подключений к базе данных."""
@@ -98,29 +125,27 @@ async def on_startup(pool: asyncpg.Pool):
         """)
     logging.info("Database tables are ready.")
 
+
 async def main():
     """Основная функция для запуска бота."""
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    setup_logging()
 
     defaults = DefaultBotProperties(parse_mode="HTML")
     bot = Bot(token=config.BOT_TOKEN, default=defaults)
     
     dp = Dispatcher()
-
-    # Регистрируем Throttling Middleware на все типы обновлений
     dp.update.middleware(ThrottlingMiddleware())
 
     db_pool = await create_db_connection_pool()
+    
+    # --- [ИСПРАВЛЕНО] Возвращаем вызов on_startup ---
     await on_startup(db_pool)
 
     dp['db_pool'] = db_pool
-
     scheduler = await setup_scheduler(db_pool)
     scheduler.start()
-    
     dp['scheduler'] = scheduler
 
-    # Регистрируем все наши роутеры
     dp.include_router(admin.router)
     dp.include_router(start.router)
     dp.include_router(channels.router)
@@ -132,4 +157,10 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Bot stopped.")
+    except Exception as e:
+        # Логируем критическую ошибку перед завершением
+        logging.critical(f"Bot failed to start: {e}", exc_info=True)
