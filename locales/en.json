@@ -147,5 +147,15 @@
     "onboarding_skipped": "Alright, you can always get back to the settings from the main menu.",
     "add_channel_unified_prompt": "<b>Add a Channel</b>\n\nTo begin, add your channel using one of these methods:\n\n1️⃣ <b>Forward a post</b> from your channel here.\n2️⃣ <b>Send a link</b> (public or private), its username (e.g., @durov), or its ID.\n\n<i>Reminder: You must be an administrator in the channel, and the bot must have permission to post.</i>",
     "invalid_channel_id_error": "🚫 Invalid format. Please send a username, ID, a full link to the channel, or forward a post.",
-    "channel_not_found_error": "🚫 Channel not found. Please make sure the data is correct and that the bot has been added to this channel."
+    "channel_not_found_error": "🚫 Channel not found. Please make sure the data is correct and that the bot has been added to this channel.",
+    "help_command_text": "<b>👋 Hello! I'm your AI assistant for Telegram channels.</b>\n\n<b>Quick Commands:</b>\n/menu - Main Menu\n/channels - Your Channels\n/balance - Balance & Top-up\n/promo - Activate Promo Code\n/support - Support\n/help - Show this help message\n\n<b>What I can do:</b>\n\n<b>📢 Channel Management</b>\nAdd your channels, organize them into folders, and configure each one individually.\n\n<b>🎨 Style Passport</b>\nYou provide me with examples of your posts, and I create a 'Style Passport' that describes your Tone of Voice, topics, and structure.\n\n<b>🚀 Auto-Posting Scenarios</b>\nSet up automatic news searches by keywords and sources (Google News, Reddit, Twitter) and have them published to your channels on a schedule.",
+    "onboarding_step3_description": "<b>Step 3: Channel Description</b>\n\nExcellent! Now, in one or two sentences, describe what your channel is about. This will help me better understand the context and find relevant news.",
+    "onboarding_step4_language": "<b>Step 4: Generation Language</b>\n\nGreat! And the final step: specify the language in which I should write posts for this channel (e.g., `english`).",
+    "onboarding_final": "🎉 <b>Congratulations! Your channel is fully configured and ready to go!</b>\n\nYou can now create your first auto-posting scenario to let me start helping you.",
+    "onboarding_go_to_scenarios_button": "🚀 Create First Scenario",
+    "admin_write_to_user_button": "✍️ Write to User",
+    "admin_broadcast_button": "📣 Broadcast",
+    "promo_enter_code_prompt": "Enter your promo code:",
+    "promo_not_found_or_expired": "❌ Promo code not found, inactive, or its usage limit has been reached.",
+    "promo_success": "✅ Promo code successfully activated! You have been credited with {count} generations."
 }

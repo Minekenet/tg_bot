@@ -1,11 +1,12 @@
 from aiogram import Router, F, Bot
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.utils.states import SupportRequest
 from bot.utils.localization import get_text
-from bot import config # Импортируем наш конфиг
+from bot import config
 
 router = Router()
 
@@ -22,11 +23,13 @@ async def start_support_request(callback: CallbackQuery, state: FSMContext):
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=get_text(lang_code, 'cancel_button'), callback_data="cancel_support_request"))
     
-    await callback.message.edit_text(
-        get_text(lang_code, 'support_request_prompt'),
-        reply_markup=builder.as_markup()
-    )
+    text = get_text(lang_code, 'support_request_prompt')
+    if isinstance(callback.message, Message):
+        await callback.message.answer(text, reply_markup=builder.as_markup())
+    else:
+        await callback.message.edit_text(text, reply_markup=builder.as_markup())
     await callback.answer()
+
 
 # Шаг 2: Пользователь отправляет свое сообщение
 @router.message(SupportRequest.waiting_for_message)
@@ -110,3 +113,10 @@ async def cancel_support(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text(get_text(lang_code, 'action_cancelled'))
     await callback.answer()
+
+@router.message(Command("support"))
+async def support_command_handler(message: Message, state: FSMContext):
+    """Обработчик команды /support для связи с техподдержкой."""
+    # Создаем "фейковый" коллбэк
+    callback_mock = CallbackQuery(id="mock", from_user=message.from_user, chat_instance="mock", message=message, data="support")
+    await start_support_request(callback_mock, state)

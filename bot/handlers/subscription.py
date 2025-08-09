@@ -1,5 +1,6 @@
 import asyncpg
 from aiogram import Router, F, Bot
+from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery, SuccessfulPayment
 
 from bot.utils.localization import get_text
@@ -26,7 +27,11 @@ async def subscription_menu_handler(callback: CallbackQuery, db_pool: asyncpg.Po
     
     keyboard, text = await get_subscription_keyboard(user_id, lang_code, db_pool)
     
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    # Проверяем, это коллбэк или "фейковый" вызов из команды
+    if isinstance(callback.message, Message):
+        await callback.message.answer(text, reply_markup=keyboard)
+    else:
+        await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 
 # ОБРАБОТЧИКИ ПОКУПКИ
@@ -87,3 +92,11 @@ async def successful_payment_handler(message: Message, db_pool: asyncpg.Pool):
         f"{get_text(lang_code, 'payment_successful')}\n"
         f"{get_text(lang_code, 'generations_added_success', count=generations_to_add)}"
     )
+
+# --- [НОВАЯ БЫСТРАЯ КОМАНДА] ---
+@router.message(Command("balance"))
+async def balance_command_handler(message: Message, db_pool: asyncpg.Pool):
+    """Обработчик команды /balance для вызова меню подписки."""
+    # Создаем "фейковый" коллбэк, чтобы переиспользовать существующий хендлер
+    callback_mock = CallbackQuery(id="mock", from_user=message.from_user, chat_instance="mock", message=message, data="subscription")
+    await subscription_menu_handler(callback_mock, db_pool)

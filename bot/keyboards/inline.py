@@ -336,3 +336,16 @@ def get_onboarding_after_channel_keyboard(lang_code: str, channel_id: int) -> In
         callback_data="skip_onboarding"
     ))
     return builder.as_markup()
+
+def get_onboarding_final_keyboard(lang_code: str, channel_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура после завершения онбординга."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text=get_text(lang_code, 'onboarding_go_to_scenarios_button'),
+        callback_data=f"scenarios_menu_{channel_id}"
+    ))
+    builder.row(InlineKeyboardButton(
+        text=get_text(lang_code, 'back_to_main_menu_button'),
+        callback_data="back_to_main_menu"
+    ))
+    return builder.as_markup()

@@ -7,7 +7,7 @@ from aiogram.client.default import DefaultBotProperties
 import asyncpg
 
 from bot import config
-from bot.handlers import start, channels, subscription, scenarios, admin, support
+from bot.handlers import start, channels, subscription, scenarios, admin, support, help, promo
 from bot.utils.scheduler import setup_scheduler
 from bot.middlewares.throttling import ThrottlingMiddleware
 from bot.utils.telegram_logger import TelegramLogsHandler
@@ -123,6 +123,19 @@ async def on_startup(pool: asyncpg.Pool):
                 UNIQUE(channel_id, source_url_hash)
             );
         """)
+        # Таблица для промокодов
+        await connection.execute("""
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                id SERIAL PRIMARY KEY,
+                promo_code VARCHAR(100) UNIQUE NOT NULL,
+                generations_awarded INTEGER NOT NULL,
+                total_uses INTEGER NOT NULL,
+                uses_left INTEGER NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_by BIGINT REFERENCES users(user_id),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
     logging.info("Database tables are ready.")
 
 
@@ -137,8 +150,6 @@ async def main():
     dp.update.middleware(ThrottlingMiddleware())
 
     db_pool = await create_db_connection_pool()
-    
-    # --- [ИСПРАВЛЕНО] Возвращаем вызов on_startup ---
     await on_startup(db_pool)
 
     dp['db_pool'] = db_pool
@@ -146,7 +157,10 @@ async def main():
     scheduler.start()
     dp['scheduler'] = scheduler
 
+    # Регистрируем все наши роутеры
     dp.include_router(admin.router)
+    dp.include_router(help.router)
+    dp.include_router(promo.router)
     dp.include_router(start.router)
     dp.include_router(channels.router)
     dp.include_router(subscription.router)
@@ -162,5 +176,4 @@ if __name__ == '__main__':
     except (KeyboardInterrupt, SystemExit):
         logging.info("Bot stopped.")
     except Exception as e:
-        # Логируем критическую ошибку перед завершением
         logging.critical(f"Bot failed to start: {e}", exc_info=True)

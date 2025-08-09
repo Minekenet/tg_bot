@@ -44,3 +44,16 @@ class Onboarding(StatesGroup):
 
 class AddChannel(StatesGroup):
     waiting_for_input = State()
+
+class DirectMessage(StatesGroup):
+    waiting_for_user_id = State()
+    waiting_for_message = State()
+    confirming_message = State()
+
+class PromoCodeCreation(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_generations = State()
+    waiting_for_uses = State()
+
+class PromoCodeActivation(StatesGroup):
+    waiting_for_code = State()

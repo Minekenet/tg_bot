@@ -3,7 +3,7 @@ import re
 import logging
 import asyncpg
 from aiogram import Router, F, Bot, types
-from aiogram.filters import StateFilter
+from aiogram.filters import StateFilter, Command
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
@@ -15,7 +15,8 @@ from bot.utils.validation import sanitize_text, is_valid_name, is_valid_descript
 from bot.keyboards.inline import (
     get_channels_keyboard, get_folder_view_keyboard, get_channel_manage_keyboard,
     get_channel_move_keyboard, get_confirmation_keyboard, get_style_passport_creation_keyboard,
-    get_onboarding_after_channel_keyboard, get_cancel_add_channel_keyboard
+    get_onboarding_after_channel_keyboard, get_cancel_add_channel_keyboard,
+    get_onboarding_final_keyboard
 )
 from bot.utils.ai_generator import generate_style_passport_from_text
 
@@ -115,7 +116,6 @@ async def _add_channel_logic(message: Message, bot: Bot, db_pool: asyncpg.Pool, 
 
 # --- [ЕДИНЫЙ ПРОЦЕСС ДОБАВЛЕНИЯ КАНАЛА] ---
 
-# Шаг 1: Пользователь нажимает кнопку "Добавить канал"
 @router.callback_query(F.data == "add_channel_start")
 async def start_add_channel_process(callback: CallbackQuery, state: FSMContext):
     lang_code = await get_user_language(callback.from_user.id, state.storage)
@@ -124,15 +124,12 @@ async def start_add_channel_process(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(get_text(lang_code, 'add_channel_unified_prompt'), reply_markup=keyboard)
     await callback.answer()
 
-# Шаг 2: Пользователь отправляет что-либо (пересылку или текст)
 @router.message(AddChannel.waiting_for_input)
 async def process_any_input_for_channel(message: Message, bot: Bot, db_pool: asyncpg.Pool, state: FSMContext):
-    # Вариант А: Пересланное сообщение
     if message.forward_from_chat and message.forward_from_chat.type == 'channel':
         await _add_channel_logic(message, bot, db_pool, state, message.forward_from_chat.id)
         return
 
-    # Вариант Б: Текст (ссылка, юзернейм или ID)
     if message.text:
         text_input = message.text.strip()
         target_id: str | int
@@ -149,11 +146,9 @@ async def process_any_input_for_channel(message: Message, bot: Bot, db_pool: asy
         await _add_channel_logic(message, bot, db_pool, state, target_id)
         return
 
-    # Если прислали не текст и не пересылку (например, фото)
     lang_code = await get_user_language(message.from_user.id, db_pool)
     await message.reply(get_text(lang_code, 'invalid_channel_id_error'))
 
-# Шаг 3: Пользователь нажимает "Отмена"
 @router.callback_query(AddChannel.waiting_for_input, F.data == "cancel_add_channel")
 async def cancel_add_channel_process(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
     await state.clear()
@@ -352,12 +347,14 @@ async def manage_style_passport(callback: CallbackQuery, state: FSMContext, db_p
 async def start_style_passport_creation(callback: CallbackQuery, state: FSMContext, channel_id: int, lang_code: str):
     await state.set_state(ChannelStylePassportCreation.collecting_posts)
     await state.update_data(posts=[], char_count=0, channel_id=channel_id)
-
     keyboard = get_style_passport_creation_keyboard(lang_code)
     text = get_text(lang_code, 'no_style_passport_yet') + "\n\n" + \
            get_text(lang_code, 'style_passport_creation_intro', post_count=0, char_count=0, max_chars=MAX_CHARS_FOR_PASSPORT)
     
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    if isinstance(callback, CallbackQuery):
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    else:
+        await callback.answer(text, reply_markup=keyboard)
     await callback.answer()
 
 @router.message(ChannelStylePassportCreation.collecting_posts)
@@ -388,8 +385,7 @@ async def collect_post_for_passport(message: Message, state: FSMContext, db_pool
 
 @router.callback_query(ChannelStylePassportCreation.collecting_posts, F.data == "style_passport_done")
 async def process_style_passport(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
-    user_id = callback.from_user.id
-    lang_code = await get_user_language(user_id, db_pool)
+    lang_code = await get_user_language(callback.from_user.id, db_pool)
     data = await state.get_data()
     channel_id = data.get('channel_id')
     
@@ -401,7 +397,6 @@ async def process_style_passport(callback: CallbackQuery, state: FSMContext, db_
         return
 
     await callback.message.edit_text(get_text(lang_code, 'style_passport_generating'))
-    
     success, passport_text = await generate_style_passport_from_text(posts_text)
 
     if success:
@@ -410,24 +405,21 @@ async def process_style_passport(callback: CallbackQuery, state: FSMContext, db_
                 "UPDATE channels SET style_passport = $1, style_passport_updated_at = NOW() WHERE channel_id = $2",
                 passport_text, channel_id
             )
-        
         await callback.message.edit_text(
             get_text(lang_code, 'style_passport_created_success', passport_text=passport_text)
         )
     else:
         await callback.message.edit_text(f"Произошла ошибка при создании паспорта: {passport_text}")
-    
     await callback.answer()
     
     current_onboarding_state = await state.get_state()
     if current_onboarding_state == Onboarding.waiting_for_passport:
-        # TODO: Завершить онбординг, перейдя к шагу с описанием
-        await state.clear() # Временная заглушка
-        await manage_channel_by_id(callback.message, db_pool, channel_id)
+        await state.set_state(Onboarding.waiting_for_description)
+        await callback.message.answer(get_text(lang_code, 'onboarding_step3_description'))
+        await start_description_input(callback, state, channel_id, lang_code)
     else:
         await state.clear()
         await manage_channel_by_id(callback.message, db_pool, channel_id)
-
 
 @router.callback_query(ChannelStylePassportCreation.collecting_posts, F.data == "style_passport_cancel")
 async def cancel_style_passport_creation(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
@@ -473,11 +465,16 @@ async def manage_activity_description(callback: CallbackQuery, state: FSMContext
     else:
         await start_description_input(callback, state, channel_id, lang_code)
 
-async def start_description_input(callback: CallbackQuery, state: FSMContext, channel_id: int, lang_code: str):
+async def start_description_input(callback: Message | CallbackQuery, state: FSMContext, channel_id: int, lang_code: str):
     await state.set_state(ChannelDescription.waiting_for_description)
     await state.update_data(channel_id=channel_id)
-    await callback.message.edit_text(get_text(lang_code, 'enter_activity_description_prompt', max_chars=MAX_CHARS_FOR_DESCRIPTION))
-    await callback.answer()
+    
+    text = get_text(lang_code, 'enter_activity_description_prompt', max_chars=MAX_CHARS_FOR_DESCRIPTION)
+    if isinstance(callback, CallbackQuery):
+        await callback.message.edit_text(text)
+        await callback.answer()
+    else:
+        await callback.answer(text)
 
 @router.message(ChannelDescription.waiting_for_description)
 async def process_activity_description(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
@@ -496,18 +493,25 @@ async def process_activity_description(message: Message, state: FSMContext, db_p
             description_text, channel_id
         )
     
-    await state.clear()
     await message.reply(get_text(lang_code, 'activity_description_saved'))
     
-    await manage_channel_by_id(message, db_pool, channel_id)
+    current_onboarding_state = await state.get_state()
+    if current_onboarding_state == Onboarding.waiting_for_description:
+        await state.set_state(Onboarding.waiting_for_language)
+        await state.update_data(channel_id=channel_id)
+        await message.answer(get_text(lang_code, 'onboarding_step4_language'))
+        await manage_generation_language(message, state, db_pool)
+    else:
+        await state.clear()
+        await manage_channel_by_id(message, db_pool, channel_id)
 
 # --- БЛОК УПРАВЛЕНИЯ ЯЗЫКОМ ГЕНЕРАЦИИ ---
 
-@router.callback_query(F.data.startswith("channel_language_"))
-async def manage_generation_language(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
-    channel_id = int(callback.data.split("_")[2])
-    user_id = callback.from_user.id
+async def manage_generation_language(message: Message | CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
+    user_id = message.from_user.id
     lang_code = await get_user_language(user_id, db_pool)
+    data = await state.get_data()
+    channel_id = data.get('channel_id')
 
     async with db_pool.acquire() as conn:
         current_lang = await conn.fetchval(
@@ -515,7 +519,6 @@ async def manage_generation_language(callback: CallbackQuery, state: FSMContext,
         ) or lang_code
     
     await state.set_state(ChannelLanguage.waiting_for_language)
-    await state.update_data(channel_id=channel_id)
     
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(
@@ -523,11 +526,18 @@ async def manage_generation_language(callback: CallbackQuery, state: FSMContext,
         callback_data=f"channel_manage_{channel_id}"
     ))
 
-    await callback.message.edit_text(
-        get_text(lang_code, 'choose_generation_language', current_lang=current_lang),
-        reply_markup=builder.as_markup()
-    )
-    await callback.answer()
+    text_to_send = get_text(lang_code, 'choose_generation_language', current_lang=current_lang)
+    if isinstance(message, CallbackQuery):
+        await message.message.edit_text(text_to_send, reply_markup=builder.as_markup())
+        await message.answer()
+    else:
+        await message.answer(text_to_send, reply_markup=builder.as_markup())
+
+@router.callback_query(F.data.startswith("channel_language_"))
+async def manage_generation_language_entry(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
+    channel_id = int(callback.data.split("_")[2])
+    await state.update_data(channel_id=channel_id)
+    await manage_generation_language(callback, state, db_pool)
 
 @router.message(ChannelLanguage.waiting_for_language)
 async def set_generation_language(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
@@ -546,10 +556,16 @@ async def set_generation_language(message: Message, state: FSMContext, db_pool: 
             new_lang, channel_id
         )
     
-    await state.clear()
     await message.reply(get_text(lang_code, 'generation_language_updated', new_lang=new_lang))
     
-    await manage_channel_by_id(message, db_pool, channel_id)
+    current_onboarding_state = await state.get_state()
+    if current_onboarding_state == Onboarding.waiting_for_language:
+        await state.clear()
+        keyboard = get_onboarding_final_keyboard(lang_code, channel_id)
+        await message.answer(get_text(lang_code, 'onboarding_final'), reply_markup=keyboard)
+    else:
+        await state.clear()
+        await manage_channel_by_id(message, db_pool, channel_id)
 
 # --- ЛОГИКА СОЗДАНИЯ ПАПКИ ---
 
@@ -580,4 +596,10 @@ async def folder_name_handler(message: Message, state: FSMContext, db_pool: asyn
     except Exception:
         await message.reply(get_text(lang_code, 'generic_error'))
     
+    await show_channels_menu(message, db_pool)
+
+@router.message(Command("channels"))
+async def channels_command_handler(message: Message, db_pool: asyncpg.Pool, state: FSMContext):
+    """Обработчик команды /channels для вызова меню каналов."""
+    await state.clear()
     await show_channels_menu(message, db_pool)
