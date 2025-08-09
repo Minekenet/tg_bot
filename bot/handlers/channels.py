@@ -3,10 +3,10 @@ import asyncpg
 from aiogram import Router, F, Bot, types
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.utils.states import FolderCreation, ChannelStylePassportCreation
+from bot.utils.states import FolderCreation, ChannelStylePassportCreation, ChannelDescription, ChannelLanguage
 from bot.utils.localization import get_text
 from bot.keyboards.inline import (
     get_channels_keyboard, get_folder_view_keyboard, get_channel_manage_keyboard,
@@ -16,9 +16,10 @@ from bot.utils.ai_generator import generate_style_passport_from_text
 
 router = Router()
 
-# --- Константы для ограничений ---
+# --- Константы ---
 MAX_POSTS_FOR_PASSPORT = 10
 MAX_CHARS_FOR_PASSPORT = 10000
+MAX_CHARS_FOR_DESCRIPTION = 2000
 PASSPORT_UPDATE_COOLDOWN = datetime.timedelta(days=3)
 
 # --- Вспомогательные функции ---
@@ -33,7 +34,6 @@ async def show_channels_menu(message: Message | CallbackQuery, db_pool: asyncpg.
     lang_code = await get_user_language(user_id, db_pool)
     keyboard = await get_channels_keyboard(user_id, lang_code, db_pool, page)
     text = get_text(lang_code, 'your_channels_title')
-    
     try:
         if isinstance(message, CallbackQuery):
             await message.message.edit_text(text, reply_markup=keyboard)
@@ -183,7 +183,7 @@ async def channel_delete_confirm_handler(callback: CallbackQuery, db_pool: async
     await callback.answer(get_text(lang_code, 'channel_deleted_success', channel_name=channel_name), show_alert=True)
     await show_channels_menu(callback, db_pool)
 
-# --- НОВЫЙ БЛОК: УПРАВЛЕНИЕ ПАСПОРТОМ СТИЛЯ ---
+# --- БЛОК УПРАВЛЕНИЯ ПАСПОРТОМ СТИЛЯ ---
 
 @router.callback_query(F.data.startswith("channel_passport_"))
 async def manage_style_passport(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
@@ -225,9 +225,9 @@ async def manage_style_passport(callback: CallbackQuery, state: FSMContext, db_p
         await start_style_passport_creation(callback, state, channel_id, lang_code)
 
 @router.callback_query(F.data.startswith("channel_passport_create_"))
-async def start_style_passport_creation_entry(callback: CallbackQuery, state: FSMContext):
+async def start_style_passport_creation_entry(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
     channel_id = int(callback.data.split("_")[3])
-    lang_code = await get_user_language(callback.from_user.id, None)
+    lang_code = await get_user_language(callback.from_user.id, db_pool)
     await start_style_passport_creation(callback, state, channel_id, lang_code)
 
 async def start_style_passport_creation(callback: CallbackQuery, state: FSMContext, channel_id: int, lang_code: str):
@@ -236,14 +236,14 @@ async def start_style_passport_creation(callback: CallbackQuery, state: FSMConte
 
     keyboard = get_style_passport_creation_keyboard(lang_code)
     text = get_text(lang_code, 'no_style_passport_yet') + "\n\n" + \
-           get_text(lang_code, 'style_passport_creation_intro', post_count=0, char_count=0, max_chars=MAX_CHARS_FOR_PASSPORT)
+           get_text(lang_code, 'style_passport_creation_intro', post_count=0, char_count=0, max_chars=MAX_POSTS_FOR_PASSPORT)
     
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 
 @router.message(ChannelStylePassportCreation.collecting_posts)
-async def collect_post_for_passport(message: Message, state: FSMContext):
-    lang_code = await get_user_language(message.from_user.id, None)
+async def collect_post_for_passport(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
+    lang_code = await get_user_language(message.from_user.id, db_pool)
     data = await state.get_data()
     
     current_posts = data.get('posts', [])
@@ -302,18 +302,148 @@ async def process_style_passport(callback: CallbackQuery, state: FSMContext, db_
     await callback.answer()
 
 @router.callback_query(ChannelStylePassportCreation.collecting_posts, F.data == "style_passport_cancel")
-async def cancel_style_passport_creation(callback: CallbackQuery, state: FSMContext):
-    lang_code = await get_user_language(callback.from_user.id, None)
+async def cancel_style_passport_creation(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
+    lang_code = await get_user_language(callback.from_user.id, db_pool)
     await state.clear()
     await callback.message.edit_text(get_text(lang_code, 'style_passport_creation_cancelled'))
     await callback.answer()
+
+# --- БЛОК УПРАВЛЕНИЯ ОПИСАНИЕМ ДЕЯТЕЛЬНОСТИ ---
+
+@router.callback_query(F.data.startswith("channel_description_create_"))
+async def start_description_input_entry(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
+    channel_id = int(callback.data.split("_")[3])
+    lang_code = await get_user_language(callback.from_user.id, db_pool)
+    await start_description_input(callback, state, channel_id, lang_code)
+
+@router.callback_query(F.data.startswith("channel_description_"))
+async def manage_activity_description(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
+    channel_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+    lang_code = await get_user_language(user_id, db_pool)
+
+    async with db_pool.acquire() as conn:
+        channel_data = await conn.fetchrow(
+            "SELECT channel_name, activity_description FROM channels WHERE channel_id = $1",
+            channel_id
+        )
+
+    if channel_data['activity_description']:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(
+            text=get_text(lang_code, 'update_activity_description_button'),
+            callback_data=f"channel_description_create_{channel_id}"
+        ))
+        builder.row(InlineKeyboardButton(
+            text=get_text(lang_code, 'back_to_channels_button'),
+            callback_data=f"channel_manage_{channel_id}"
+        ))
+        await callback.message.edit_text(
+            get_text(lang_code, 'current_activity_description', channel_name=channel_data['channel_name'], description_text=channel_data['activity_description']),
+            reply_markup=builder.as_markup()
+        )
+    else:
+        await start_description_input(callback, state, channel_id, lang_code)
+
+async def start_description_input(callback: CallbackQuery, state: FSMContext, channel_id: int, lang_code: str):
+    await state.set_state(ChannelDescription.waiting_for_description)
+    await state.update_data(channel_id=channel_id)
+    await callback.message.edit_text(get_text(lang_code, 'enter_activity_description_prompt', max_chars=MAX_CHARS_FOR_DESCRIPTION))
+    await callback.answer()
+
+@router.message(ChannelDescription.waiting_for_description)
+async def process_activity_description(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
+    lang_code = await get_user_language(message.from_user.id, db_pool)
+    data = await state.get_data()
+    channel_id = data.get('channel_id')
+    description_text = message.text or ""
+
+    if len(description_text) > MAX_CHARS_FOR_DESCRIPTION:
+        await message.reply(get_text(lang_code, 'char_limit_exceeded', max_chars=MAX_CHARS_FOR_DESCRIPTION))
+        return
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE channels SET activity_description = $1 WHERE channel_id = $2",
+            description_text, channel_id
+        )
+    
+    await state.clear()
+    await message.reply(get_text(lang_code, 'activity_description_saved'))
+    
+    await manage_channel_by_id(message, db_pool, channel_id)
+
+async def manage_channel_by_id(message: Message, db_pool: asyncpg.Pool, channel_id: int):
+    lang_code = await get_user_language(message.from_user.id, db_pool)
+    async with db_pool.acquire() as conn:
+        channel_name = await conn.fetchval("SELECT channel_name FROM channels WHERE channel_id = $1", channel_id)
+    
+    keyboard = await get_channel_manage_keyboard(channel_id, lang_code, db_pool)
+    await message.answer(get_text(lang_code, 'manage_channel_title', channel_name=channel_name), reply_markup=keyboard)
+
+# --- БЛОК УПРАВЛЕНИЯ ЯЗЫКОМ ГЕНЕРАЦИИ ---
+
+@router.callback_query(F.data.startswith("channel_language_"))
+async def manage_generation_language(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
+    channel_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+    lang_code = await get_user_language(user_id, db_pool)
+
+    async with db_pool.acquire() as conn:
+        current_lang = await conn.fetchval(
+            "SELECT generation_language FROM channels WHERE channel_id = $1", channel_id
+        ) or lang_code
+    
+    await state.set_state(ChannelLanguage.waiting_for_language)
+    await state.update_data(channel_id=channel_id)
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text=get_text(lang_code, 'back_to_channels_button'),
+        callback_data=f"channel_manage_{channel_id}"
+    ))
+
+    await callback.message.edit_text(
+        get_text(lang_code, 'choose_generation_language', current_lang=current_lang),
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+@router.message(ChannelLanguage.waiting_for_language)
+async def set_generation_language(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
+    data = await state.get_data()
+    channel_id = data.get('channel_id')
+    new_lang = message.text.strip()
+    lang_code = await get_user_language(message.from_user.id, db_pool)
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE channels SET generation_language = $1 WHERE channel_id = $2",
+            new_lang, channel_id
+        )
+    
+    await state.clear()
+    await message.reply(get_text(lang_code, 'generation_language_updated', new_lang=new_lang))
+    
+    await manage_channel_by_id(message, db_pool, channel_id)
 
 # --- ЛОГИКА ДОБАВЛЕНИЯ КАНАЛА И СОЗДАНИЯ ПАПКИ ---
 
 @router.callback_query(F.data == "add_channel")
 async def add_channel_callback(callback: CallbackQuery, db_pool: asyncpg.Pool):
     lang_code = await get_user_language(callback.from_user.id, db_pool)
-    await callback.message.edit_text(get_text(lang_code, 'add_channel_prompt'))
+    
+    # --- ИЗМЕНЕНИЕ ЗДЕСЬ: ДОБАВЛЯЕМ КНОПКУ "ОТМЕНА" ---
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text=get_text(lang_code, 'cancel_button'),
+        callback_data="my_channels_menu" # Возврат в меню каналов
+    ))
+    
+    await callback.message.edit_text(
+        get_text(lang_code, 'add_channel_prompt'),
+        reply_markup=builder.as_markup()
+    )
     await callback.answer()
 
 @router.message(F.forward_from_chat)

@@ -1,24 +1,26 @@
 import asyncio
 import logging
-import os
-from dotenv import load_dotenv
-
 import asyncpg
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 
-from bot.handlers import start, channels, subscription
+# Импортируем наш централизованный конфиг
+from bot import config
 
-# Загружаем переменные окружения из .env файла
-load_dotenv()
+# Импортируем все роутеры
+from bot.handlers import start, channels, subscription, scenarios, admin, support
+
+# Импортируем утилиты и middleware
+from bot.utils.scheduler import setup_scheduler
+from bot.middlewares.throttling import ThrottlingMiddleware
 
 async def create_db_connection_pool():
     """Создает пул подключений к базе данных."""
     return await asyncpg.create_pool(
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        database=os.getenv("DB_NAME"),
-        host=os.getenv("DB_HOST"),
+        user=config.DB_USER,
+        password=config.DB_PASSWORD,
+        database=config.DB_NAME,
+        host=config.DB_HOST,
     )
 
 async def on_startup(pool: asyncpg.Pool):
@@ -53,30 +55,45 @@ async def on_startup(pool: asyncpg.Pool):
                 folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL,
                 style_passport TEXT,
                 style_passport_updated_at TIMESTAMP WITH TIME ZONE,
-                added_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        # Таблица ИИ-профилей (больше не используется, но оставим на будущее)
-        await connection.execute("""
-            CREATE TABLE IF NOT EXISTS ai_profiles (
-                id SERIAL PRIMARY KEY,
-                owner_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                profile_name VARCHAR(100) NOT NULL,
                 activity_description TEXT,
-                style_passport TEXT,
-                search_scenarios TEXT,
-                created_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(owner_id, profile_name)
+                generation_language VARCHAR(50),
+                added_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         """)
         # Таблица подписок
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS subscriptions (
                 user_id BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
-                plan_name VARCHAR(50) NOT NULL DEFAULT 'free',
-                expires_at TIMESTAMP WITH TIME ZONE,
                 generations_left INTEGER NOT NULL DEFAULT 3,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        # Таблица для сценариев авто-постинга
+        await connection.execute("""
+            CREATE TABLE IF NOT EXISTS posting_scenarios (
+                id SERIAL PRIMARY KEY,
+                owner_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                channel_id BIGINT NOT NULL REFERENCES channels(channel_id) ON DELETE CASCADE,
+                scenario_name VARCHAR(100) NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                keywords TEXT,
+                sources TEXT,
+                media_strategy VARCHAR(50) DEFAULT 'text_plus_media',
+                posting_mode VARCHAR(50) DEFAULT 'direct', -- 'direct' or 'moderation'
+                run_times TEXT, -- Comma-separated times, e.g., '09:00,18:30'
+                timezone VARCHAR(50) DEFAULT 'UTC',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(channel_id, scenario_name)
+            );
+        """)
+        # Таблица для предотвращения дубликатов
+        await connection.execute("""
+            CREATE TABLE IF NOT EXISTS published_posts (
+                id SERIAL PRIMARY KEY,
+                channel_id BIGINT NOT NULL,
+                source_url_hash VARCHAR(64) NOT NULL,
+                published_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(channel_id, source_url_hash)
             );
         """)
     logging.info("Database tables are ready.")
@@ -86,23 +103,31 @@ async def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     defaults = DefaultBotProperties(parse_mode="HTML")
-    bot = Bot(token=os.getenv("BOT_TOKEN"), default=defaults)
+    bot = Bot(token=config.BOT_TOKEN, default=defaults)
     
     dp = Dispatcher()
 
-    # Создание пула подключений к БД
+    # Регистрируем Throttling Middleware на все типы обновлений
+    dp.update.middleware(ThrottlingMiddleware())
+
     db_pool = await create_db_connection_pool()
     await on_startup(db_pool)
 
-    # Передаем пул подключений в хэндлеры через middleware
     dp['db_pool'] = db_pool
 
-    # Подключение роутеров
+    scheduler = await setup_scheduler(db_pool)
+    scheduler.start()
+    
+    dp['scheduler'] = scheduler
+
+    # Регистрируем все наши роутеры
+    dp.include_router(admin.router)
     dp.include_router(start.router)
     dp.include_router(channels.router)
     dp.include_router(subscription.router)
+    dp.include_router(support.router)
+    dp.include_router(scenarios.router)
 
-    # Удаление старых вебхуков и запуск polling
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 

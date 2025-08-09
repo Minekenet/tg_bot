@@ -1,24 +1,52 @@
 version: '3.8'
 
 services:
-  # Сервис нашего бота
   bot:
     build: .
-    env_file: .env # Подключаем файл с переменными окружения
-    restart: always # Всегда перезапускать, если упадет
+    # Используем secrets вместо env_file
+    secrets:
+      - bot_token
+      - admin_user_ids
+      - serper_api_key
+      - ai_studio_api_key
+      - db_user
+      - db_password
+      - db_name
+    restart: always
     depends_on:
-      - db # Запускать только после того, как запустится сервис 'db'
+      - db
 
-  # Сервис базы данных PostgreSQL
   db:
     image: postgres:14-alpine
+    # Указываем файлы с секретами для PostgreSQL
     environment:
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER_FILE: /run/secrets/db_user
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_DB_FILE: /run/secrets/db_name
     volumes:
-      - postgres_data:/var/lib/postgresql/data/ # Сохраняем данные БД между перезапусками
+      - postgres_data:/var/lib/postgresql/data/
+    secrets:
+      - db_user
+      - db_password
+      - db_name
     restart: always
 
 volumes:
   postgres_data:
+
+# Определяем все секреты и указываем путь к файлам на хост-машине
+secrets:
+  bot_token:
+    file: ./bot_token.txt
+  admin_user_ids:
+    file: ./admin_user_ids.txt
+  serper_api_key:
+    file: ./serper_api_key.txt
+  ai_studio_api_key:
+    file: ./ai_studio_api_key.txt
+  db_user:
+    file: ./db_user.txt
+  db_password:
+    file: ./db_password.txt
+  db_name:
+    file: ./db_name.txt
