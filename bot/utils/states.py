@@ -11,6 +11,7 @@ class ChannelDescription(StatesGroup):
 
 class ScenarioCreation(StatesGroup):
     waiting_for_name = State()
+    waiting_for_theme = State() # Новый шаг
     adding_keywords = State()
     adding_times = State()
     choosing_sources = State()
@@ -18,12 +19,12 @@ class ScenarioCreation(StatesGroup):
     choosing_posting_mode = State()
     waiting_for_timezone = State()
 
-# ИЗМЕНЕНО: Добавлены новые состояния для редактирования
 class ScenarioEditing(StatesGroup):
     choosing_option = State()
     editing_name = State()
+    editing_theme = State() # Новый шаг
     editing_keywords = State()
-    editing_sources = State()
+    editing_sources = State() # Новый шаг
     editing_media_strategy = State()
     editing_posting_mode = State()
     editing_times = State()

@@ -54,8 +54,7 @@ async def create_db_connection_pool():
 async def on_startup(pool: asyncpg.Pool):
     """Выполняет действия при старте бота, например, создает таблицы в БД."""
     async with pool.acquire() as connection:
-        # (код создания таблиц остается без изменений, поэтому для краткости скрыт)
-        # ...
+        # Таблица пользователей
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -65,6 +64,7 @@ async def on_startup(pool: asyncpg.Pool):
                 registration_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        # Таблица папок
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS folders (
                 id SERIAL PRIMARY KEY,
@@ -73,6 +73,7 @@ async def on_startup(pool: asyncpg.Pool):
                 UNIQUE(owner_id, folder_name)
             );
         """)
+        # Таблица каналов
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS channels (
                 id SERIAL PRIMARY KEY,
@@ -87,6 +88,7 @@ async def on_startup(pool: asyncpg.Pool):
                 added_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        # Таблица подписок
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS subscriptions (
                 user_id BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
@@ -94,23 +96,26 @@ async def on_startup(pool: asyncpg.Pool):
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        # Таблица для сценариев авто-постинга
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS posting_scenarios (
                 id SERIAL PRIMARY KEY,
                 owner_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
                 channel_id BIGINT NOT NULL REFERENCES channels(channel_id) ON DELETE CASCADE,
                 scenario_name VARCHAR(100) NOT NULL,
+                theme TEXT,
                 is_active BOOLEAN DEFAULT TRUE,
                 keywords TEXT,
                 sources TEXT,
                 media_strategy VARCHAR(50) DEFAULT 'text_plus_media',
-                posting_mode VARCHAR(50) DEFAULT 'direct', -- 'direct' or 'moderation'
-                run_times TEXT, -- Comma-separated times, e.g., '09:00,18:30'
+                posting_mode VARCHAR(50) DEFAULT 'direct',
+                run_times TEXT,
                 timezone VARCHAR(50) DEFAULT 'UTC',
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(channel_id, scenario_name)
             );
         """)
+        # Таблица для предотвращения дубликатов
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS published_posts (
                 id SERIAL PRIMARY KEY,
@@ -120,6 +125,7 @@ async def on_startup(pool: asyncpg.Pool):
                 UNIQUE(channel_id, source_url_hash)
             );
         """)
+        # Таблица для промокодов
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS promo_codes (
                 id SERIAL PRIMARY KEY,
@@ -139,14 +145,11 @@ async def main():
     """Основная функция для запуска бота."""
     setup_logging()
 
-    # ИЗМЕНЕНО: Инициализация хранилища Redis
-    # 'redis' - это имя сервиса из docker-compose.yml
     storage = RedisStorage.from_url('redis://redis:6379/0')
 
     defaults = DefaultBotProperties(parse_mode="HTML")
     bot = Bot(token=config.BOT_TOKEN, default=defaults)
     
-    # ИЗМЕНЕНО: Передаем storage в Dispatcher
     dp = Dispatcher(storage=storage)
     dp.update.middleware(ThrottlingMiddleware())
 

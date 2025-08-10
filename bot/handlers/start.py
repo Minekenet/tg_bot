@@ -5,7 +5,7 @@ from aiogram.fsm.context import FSMContext
 import asyncpg
 
 from bot.utils.localization import get_text
-from bot.keyboards.inline import language_selection_keyboard, get_main_menu_keyboard, get_cancel_add_channel_keyboard
+from bot.keyboards.inline import language_selection_keyboard, get_main_menu_keyboard, get_cancel_add_channel_keyboard, get_welcome_keyboard
 from bot.utils.states import AddChannel
 
 router = Router()
@@ -49,14 +49,13 @@ async def command_start_handler(message: Message, db_pool: asyncpg.Pool, state: 
 @router.callback_query(F.data.startswith("lang_"))
 async def language_selection_callback(callback: CallbackQuery, db_pool: asyncpg.Pool, state: FSMContext):
     """
-    Обрабатывает выбор языка, сохраняет его и ЗАПУСКАЕТ ПРОЦЕСС ОНБОРДИНГА.
+    Обрабатывает выбор языка, сохраняет его и показывает приветственное сообщение или главное меню.
     """
     lang_code = callback.data.split("_")[1]
     user_id = callback.from_user.id
     username = callback.from_user.username or ''
 
     async with db_pool.acquire() as connection:
-        # Проверяем, существует ли пользователь
         is_existing_user = await connection.fetchval("SELECT 1 FROM users WHERE user_id = $1", user_id)
 
         await connection.execute(
@@ -68,14 +67,22 @@ async def language_selection_callback(callback: CallbackQuery, db_pool: asyncpg.
     await callback.answer(get_text(lang_code, "user_added"))
 
     if is_existing_user:
-        # Если пользователь уже был, просто показываем ему главное меню на новом языке
         await show_main_menu(callback, lang_code)
     else:
-        # Если это абсолютно новый пользователь, начинаем онбординг
-        await state.set_state(AddChannel.waiting_for_input)
-        keyboard = get_cancel_add_channel_keyboard(lang_code)
-        text = get_text(lang_code, 'onboarding_step1_welcome') + "\n\n" + get_text(lang_code, 'add_channel_unified_prompt')
+        # Для нового пользователя показываем приветственное сообщение
+        text = get_text(lang_code, 'welcome_features_message')
+        keyboard = get_welcome_keyboard(lang_code)
         await callback.message.edit_text(text, reply_markup=keyboard)
+
+@router.callback_query(F.data == "start_onboarding")
+async def start_onboarding_callback(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
+    """Запускает процесс онбординга после приветственного сообщения."""
+    lang_code = await get_user_language(callback.from_user.id, db_pool)
+    await state.set_state(AddChannel.waiting_for_input)
+    keyboard = get_cancel_add_channel_keyboard(lang_code)
+    text = get_text(lang_code, 'onboarding_step1_welcome') + "\n\n" + get_text(lang_code, 'add_channel_unified_prompt')
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "back_to_main_menu")
@@ -93,9 +100,8 @@ async def menu_command_handler(message: Message, db_pool: asyncpg.Pool, state: F
     lang_code = await get_user_language(message.from_user.id, db_pool)
     await show_main_menu(message, lang_code)
 
-# --- [НОВАЯ БЫСТРАЯ КОМАНДА] ---
 @router.message(Command("language"))
 async def language_command_handler(message: Message, state: FSMContext):
     """Обработчик команды /language для смены языка."""
-    await state.clear() # Сбрасываем любой текущий стейт, чтобы не было конфликтов
+    await state.clear()
     await message.answer(get_text("ru", "choose_language"), reply_markup=language_selection_keyboard())

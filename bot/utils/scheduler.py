@@ -33,7 +33,7 @@ async def process_scenario_job(scenario_id: int, user_id: int, channel_id: int):
         
         can_generate = await check_and_decrement_limit(user_id, db_pool)
         if not can_generate:
-            msg = get_text(lang_code, 'limit_exceeded_error')
+            msg = get_text(lang_code, 'limit_exceeded_error_job')
             await bot.send_message(user_id, msg)
             return
 
@@ -74,7 +74,7 @@ async def process_scenario_job(scenario_id: int, user_id: int, channel_id: int):
 
         news_for_analysis = "\n".join([f"- Title: {item['title']}\n  Snippet: {item['snippet']}\n  Link: {item['link']}" for item in unique_news[:10]])
         analysis_prompt = f"""
-        Ты - редактор новостей. Проанализируй этот список свежих новостей. Выбери ОДНУ самую важную и интересную.
+        Ты - редактор новостей. Проанализируй этот список свежих новостей. Выбери ОДНУ самую важную и интересную, которая соответствует теме '{scenario.get('theme', 'общие новости')}'.
         Верни ответ СТРОГО в формате JSON с ключами "title", "link", "snippet". Новости для анализа: {news_for_analysis}
         """
         success, best_news_json = await generate_text(analysis_prompt)
@@ -86,13 +86,14 @@ async def process_scenario_job(scenario_id: int, user_id: int, channel_id: int):
         article_text = await get_article_text(best_news.get('link')) or best_news.get('snippet')
 
         generation_prompt = f"""
-        Напиши пост для Telegram-канала на основе материала:
+        Напиши пост для Telegram-канала на основе материала.
         ---
         {article_text}
         ---
         ИНСТРУКЦИИ:
         - Проанализируй материал, создай новый уникальный текст, раскрывающий суть.
         - Соблюдай стиль, используя "Паспорт стиля" и "Описание канала".
+        - Текст должен соответствовать общей теме: '{scenario.get('theme', 'общие новости')}'.
         - В конце поста обязательно добавь ссылку на источник.
         ДАННЫЕ:
         - Язык: {channel.get('generation_language') or 'русский'}
@@ -103,7 +104,7 @@ async def process_scenario_job(scenario_id: int, user_id: int, channel_id: int):
         success, post_text = await generate_text(generation_prompt)
         if not success: return
 
-        image_url = await find_creative_commons_image_url(best_news.get('title')) if scenario['media_strategy'] == 'text_plus_media' else None
+        image_url = await find_creative_commons_image_url(f"{best_news.get('title')} {scenario.get('theme', '')}") if scenario['media_strategy'] == 'text_plus_media' else None
 
         if scenario['posting_mode'] == 'moderation':
             keyboard = get_moderation_keyboard(lang_code, channel_id)
@@ -135,7 +136,7 @@ async def process_scenario_job(scenario_id: int, user_id: int, channel_id: int):
 def add_job_to_scheduler(scheduler: AsyncIOScheduler, scenario: dict):
     if not scenario.get('run_times'): return
     
-    times = [t.strip() for t in scenario['run_times'].split(',')]
+    times = [t.strip() for t in scenario['run_times'].split(',') if t.strip()]
     for t in times:
         try:
             hour, minute = map(int, t.split(':'))
@@ -158,7 +159,7 @@ def add_job_to_scheduler(scheduler: AsyncIOScheduler, scenario: dict):
 
 def remove_job_from_scheduler(scheduler: AsyncIOScheduler, scenario: dict):
     if not scenario.get('run_times'): return
-    times = [t.strip() for t in scenario['run_times'].split(',')]
+    times = [t.strip() for t in scenario['run_times'].split(',') if t.strip()]
     for t in times:
         try:
             hour, minute = map(int, t.split(':'))
@@ -166,8 +167,9 @@ def remove_job_from_scheduler(scheduler: AsyncIOScheduler, scenario: dict):
             if scheduler.get_job(job_id):
                 scheduler.remove_job(job_id)
                 print(f"Задача '{job_id}' удалена из планировщика.")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Не удалось удалить задачу {t} для сценария #{scenario['id']}: {e}")
+
 
 async def setup_scheduler(db_pool: asyncpg.Pool) -> AsyncIOScheduler:
     jobstores = {'default': SQLAlchemyJobStore(url='sqlite:///jobs.sqlite')}

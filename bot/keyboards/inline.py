@@ -16,6 +16,14 @@ def language_selection_keyboard() -> InlineKeyboardMarkup:
     )
     return keyboard
 
+def get_welcome_keyboard(lang_code: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text=get_text(lang_code, 'welcome_continue_button'),
+        callback_data="start_onboarding"
+    ))
+    return builder.as_markup()
+
 def get_main_menu_keyboard(lang_code: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(
@@ -269,9 +277,10 @@ async def get_manage_scenario_keyboard(scenario_id: int, lang_code: str, db_pool
 def get_scenario_edit_keyboard(scenario_id: int, lang_code: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="📝 Название", callback_data=f"s_edit_name_{scenario_id}"))
+    builder.row(InlineKeyboardButton(text="🎯 Тема", callback_data=f"s_edit_theme_{scenario_id}"))
     builder.row(InlineKeyboardButton(text="🔑 Ключевые слова", callback_data=f"s_edit_keywords_{scenario_id}"))
+    builder.row(InlineKeyboardButton(text="Источники", callback_data=f"s_edit_sources_{scenario_id}"))
     builder.row(InlineKeyboardButton(text="⏰ Время запуска", callback_data=f"s_edit_times_{scenario_id}"))
-    builder.row(InlineKeyboardButton(text="🌍 Часовой пояс", callback_data=f"s_edit_timezone_{scenario_id}"))
     builder.row(InlineKeyboardButton(text="⬅️ Назад к управлению", callback_data=f"scenario_manage_{scenario_id}"))
     return builder.as_markup()
 
@@ -314,14 +323,6 @@ def get_created_scenario_nav_keyboard(lang_code: str, scenario_id: int) -> Inlin
     builder.row(InlineKeyboardButton(
         text=get_text(lang_code, 'go_to_scenario_settings_button'),
         callback_data=f"scenario_manage_{scenario_id}"
-    ))
-    return builder.as_markup()
-
-def get_onboarding_skip_keyboard(lang_code: str) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(
-        text=get_text(lang_code, 'onboarding_skip_button'),
-        callback_data="skip_onboarding"
     ))
     return builder.as_markup()
 
