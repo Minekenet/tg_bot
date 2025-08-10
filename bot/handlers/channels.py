@@ -90,7 +90,7 @@ async def _add_channel_logic(message: Message, bot: Bot, db_pool: asyncpg.Pool, 
         
         if is_onboarding:
             await state.set_state(Onboarding.waiting_for_passport)
-            await state.update_data(channel_id=chat_info.id)
+            await state.update_data(channel_id=chat_info.id, onboarding_flow=True)
             keyboard = get_onboarding_after_channel_keyboard(lang_code, chat_info.id)
             await message.answer(
                 get_text(lang_code, 'onboarding_step2_passport'),
@@ -117,8 +117,8 @@ async def _add_channel_logic(message: Message, bot: Bot, db_pool: asyncpg.Pool, 
 # --- [ЕДИНЫЙ ПРОЦЕСС ДОБАВЛЕНИЯ КАНАЛА] ---
 
 @router.callback_query(F.data == "add_channel_start")
-async def start_add_channel_process(callback: CallbackQuery, state: FSMContext):
-    lang_code = await get_user_language(callback.from_user.id, state.storage)
+async def start_add_channel_process(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
+    lang_code = await get_user_language(callback.from_user.id, db_pool)
     await state.set_state(AddChannel.waiting_for_input)
     keyboard = get_cancel_add_channel_keyboard(lang_code)
     await callback.message.edit_text(get_text(lang_code, 'add_channel_unified_prompt'), reply_markup=keyboard)
@@ -344,44 +344,69 @@ async def manage_style_passport(callback: CallbackQuery, state: FSMContext, db_p
     else:
         await start_style_passport_creation(callback, state, channel_id, lang_code)
 
-async def start_style_passport_creation(callback: CallbackQuery, state: FSMContext, channel_id: int, lang_code: str):
+async def start_style_passport_creation(callback_or_message: Message | CallbackQuery, state: FSMContext, channel_id: int, lang_code: str):
     await state.set_state(ChannelStylePassportCreation.collecting_posts)
-    await state.update_data(posts=[], char_count=0, channel_id=channel_id)
+    current_data = await state.get_data()
+    current_data.update({
+        "posts": [], 
+        "char_count": 0, 
+        "channel_id": channel_id
+    })
+    await state.set_data(current_data)
+
     keyboard = get_style_passport_creation_keyboard(lang_code)
     text = get_text(lang_code, 'no_style_passport_yet') + "\n\n" + \
            get_text(lang_code, 'style_passport_creation_intro', post_count=0, char_count=0, max_chars=MAX_CHARS_FOR_PASSPORT)
     
-    if isinstance(callback, CallbackQuery):
-        await callback.message.edit_text(text, reply_markup=keyboard)
+    sent_message = None
+    if isinstance(callback_or_message, CallbackQuery):
+        await callback_or_message.message.edit_text(text, reply_markup=keyboard)
+        sent_message = callback_or_message.message
+        await callback_or_message.answer()
     else:
-        await callback.answer(text, reply_markup=keyboard)
-    await callback.answer()
+        sent_message = await callback_or_message.answer(text, reply_markup=keyboard)
+    
+    if sent_message:
+        await state.update_data(instruction_message_id=sent_message.message_id)
 
 @router.message(ChannelStylePassportCreation.collecting_posts)
-async def collect_post_for_passport(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
-    lang_code = await get_user_language(message.from_user.id, db_pool)
+async def collect_post_for_passport(message: Message, state: FSMContext, bot: Bot):
+    lang_code = await get_user_language(message.from_user.id, None)
     data = await state.get_data()
     
     current_posts = data.get('posts', [])
     current_chars = data.get('char_count', 0)
+    instruction_message_id = data.get('instruction_message_id')
+    post_text = message.text or message.caption or ""
 
-    if len(current_posts) >= MAX_POSTS_FOR_PASSPORT or current_chars + len(message.text or "") > MAX_CHARS_FOR_PASSPORT:
-        await message.reply(get_text(lang_code, 'style_passport_limit_exceeded'))
+    await message.delete()
+
+    if len(current_posts) >= MAX_POSTS_FOR_PASSPORT or current_chars + len(post_text) > MAX_CHARS_FOR_PASSPORT:
         return
         
-    post_text = message.text or message.caption or ""
     if not post_text: return
 
     current_posts.append(post_text)
     new_char_count = current_chars + len(post_text)
     await state.update_data(posts=current_posts, char_count=new_char_count)
 
-    await message.reply(
-        get_text(lang_code, 'style_passport_post_accepted', 
+    if instruction_message_id:
+        text_to_edit = get_text(lang_code, 'style_passport_creation_intro', 
                  post_count=len(current_posts), 
                  char_count=new_char_count, 
                  max_chars=MAX_CHARS_FOR_PASSPORT)
-    )
+        
+        keyboard = get_style_passport_creation_keyboard(lang_code)
+        
+        try:
+            await bot.edit_message_text(
+                text=text_to_edit,
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                reply_markup=keyboard
+            )
+        except TelegramBadRequest:
+            pass
 
 @router.callback_query(ChannelStylePassportCreation.collecting_posts, F.data == "style_passport_done")
 async def process_style_passport(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
@@ -391,12 +416,15 @@ async def process_style_passport(callback: CallbackQuery, state: FSMContext, db_
     
     posts_text = "\n\n---\n\n".join(data.get('posts', []))
     if not posts_text:
-        await state.clear()
         await callback.message.edit_text(get_text(lang_code, 'style_passport_creation_cancelled'))
         await callback.answer("Вы не отправили ни одного поста для анализа.", show_alert=True)
+        await state.clear()
+        await manage_channel_by_id(callback.message, db_pool, channel_id)
         return
 
     await callback.message.edit_text(get_text(lang_code, 'style_passport_generating'))
+    await callback.answer()
+
     success, passport_text = await generate_style_passport_from_text(posts_text)
 
     if success:
@@ -410,13 +438,13 @@ async def process_style_passport(callback: CallbackQuery, state: FSMContext, db_
         )
     else:
         await callback.message.edit_text(f"Произошла ошибка при создании паспорта: {passport_text}")
-    await callback.answer()
+        await state.clear()
+        await manage_channel_by_id(callback.message, db_pool, channel_id)
+        return
     
-    current_onboarding_state = await state.get_state()
-    if current_onboarding_state == Onboarding.waiting_for_passport:
+    if data.get('onboarding_flow'):
         await state.set_state(Onboarding.waiting_for_description)
         await callback.message.answer(get_text(lang_code, 'onboarding_step3_description'))
-        await start_description_input(callback, state, channel_id, lang_code)
     else:
         await state.clear()
         await manage_channel_by_id(callback.message, db_pool, channel_id)
@@ -424,9 +452,14 @@ async def process_style_passport(callback: CallbackQuery, state: FSMContext, db_
 @router.callback_query(ChannelStylePassportCreation.collecting_posts, F.data == "style_passport_cancel")
 async def cancel_style_passport_creation(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
     lang_code = await get_user_language(callback.from_user.id, db_pool)
+    data = await state.get_data()
+    channel_id = data.get('channel_id')
+    
     await state.clear()
     await callback.message.edit_text(get_text(lang_code, 'style_passport_creation_cancelled'))
     await callback.answer()
+    
+    await manage_channel_by_id(callback.message, db_pool, channel_id)
 
 # --- БЛОК УПРАВЛЕНИЯ ОПИСАНИЕМ ДЕЯТЕЛЬНОСТИ ---
 
@@ -476,7 +509,8 @@ async def start_description_input(callback: Message | CallbackQuery, state: FSMC
     else:
         await callback.answer(text)
 
-@router.message(ChannelDescription.waiting_for_description)
+# ИЗМЕНЕНО: Обработчик теперь слушает ДВА состояния
+@router.message(StateFilter(Onboarding.waiting_for_description, ChannelDescription.waiting_for_description))
 async def process_activity_description(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
     lang_code = await get_user_language(message.from_user.id, db_pool)
     data = await state.get_data()
@@ -495,12 +529,9 @@ async def process_activity_description(message: Message, state: FSMContext, db_p
     
     await message.reply(get_text(lang_code, 'activity_description_saved'))
     
-    current_onboarding_state = await state.get_state()
-    if current_onboarding_state == Onboarding.waiting_for_description:
+    if data.get('onboarding_flow'):
         await state.set_state(Onboarding.waiting_for_language)
-        await state.update_data(channel_id=channel_id)
         await message.answer(get_text(lang_code, 'onboarding_step4_language'))
-        await manage_generation_language(message, state, db_pool)
     else:
         await state.clear()
         await manage_channel_by_id(message, db_pool, channel_id)
@@ -539,7 +570,8 @@ async def manage_generation_language_entry(callback: CallbackQuery, state: FSMCo
     await state.update_data(channel_id=channel_id)
     await manage_generation_language(callback, state, db_pool)
 
-@router.message(ChannelLanguage.waiting_for_language)
+# ИЗМЕНЕНО: Обработчик теперь слушает ДВА состояния
+@router.message(StateFilter(Onboarding.waiting_for_language, ChannelLanguage.waiting_for_language))
 async def set_generation_language(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
     data = await state.get_data()
     channel_id = data.get('channel_id')
@@ -558,8 +590,7 @@ async def set_generation_language(message: Message, state: FSMContext, db_pool: 
     
     await message.reply(get_text(lang_code, 'generation_language_updated', new_lang=new_lang))
     
-    current_onboarding_state = await state.get_state()
-    if current_onboarding_state == Onboarding.waiting_for_language:
+    if data.get('onboarding_flow'):
         await state.clear()
         keyboard = get_onboarding_final_keyboard(lang_code, channel_id)
         await message.answer(get_text(lang_code, 'onboarding_final'), reply_markup=keyboard)

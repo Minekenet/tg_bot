@@ -10,13 +10,16 @@ from bot.keyboards.inline import get_cancel_add_channel_keyboard
 
 router = Router()
 
+# ИЗМЕНЕНО: db_pool теперь обязательный аргумент asyncpg.Pool
 async def get_user_language(user_id: int, db_pool: asyncpg.Pool) -> str:
     async with db_pool.acquire() as connection:
         return await connection.fetchval("SELECT language_code FROM users WHERE user_id = $1", user_id) or 'ru'
 
+# ИЗМЕНЕНО: Добавлен аргумент db_pool: asyncpg.Pool
 @router.message(Command("promo"))
-async def promo_command_handler(message: Message, state: FSMContext):
-    lang_code = await get_user_language(message.from_user.id, state.storage)
+async def promo_command_handler(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
+    # ИЗМЕНЕНО: Передаем db_pool вместо state.storage
+    lang_code = await get_user_language(message.from_user.id, db_pool)
     await state.set_state(PromoCodeActivation.waiting_for_code)
     keyboard = get_cancel_add_channel_keyboard(lang_code) # Используем ту же клавиатуру отмены
     await message.answer(get_text(lang_code, 'promo_enter_code_prompt'), reply_markup=keyboard)
@@ -56,9 +59,10 @@ async def process_promo_code(message: Message, state: FSMContext, db_pool: async
     await message.reply(get_text(lang_code, 'promo_success', count=generations_awarded))
     await state.clear()
 
+# ИЗМЕНЕНО: state.storage заменен на db_pool
 @router.callback_query(PromoCodeActivation.waiting_for_code, F.data == "cancel_add_channel")
-async def cancel_promo_activation(callback: CallbackQuery, state: FSMContext):
-    lang_code = await get_user_language(callback.from_user.id, state.storage)
+async def cancel_promo_activation(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
+    lang_code = await get_user_language(callback.from_user.id, db_pool)
     await state.clear()
     await callback.message.edit_text(get_text(lang_code, 'action_cancelled'))
     await callback.answer()

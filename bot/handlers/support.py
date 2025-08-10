@@ -13,9 +13,9 @@ router = Router()
 # Используем список админов из централизованного конфига
 ADMIN_IDS = config.ADMINS
 
-# Шаг 1: Пользователь нажимает кнопку "Техподдержка"
+# Шаг 1: Пользователь нажимает кнопку "Техподдержка" или вводит команду
 @router.callback_query(F.data == "support")
-async def start_support_request(callback: CallbackQuery, state: FSMContext):
+async def start_support_request(callback: CallbackQuery, state: FSMContext, bot: Bot):
     lang_code = callback.from_user.language_code or 'ru'
     
     await state.set_state(SupportRequest.waiting_for_message)
@@ -24,11 +24,15 @@ async def start_support_request(callback: CallbackQuery, state: FSMContext):
     builder.row(InlineKeyboardButton(text=get_text(lang_code, 'cancel_button'), callback_data="cancel_support_request"))
     
     text = get_text(lang_code, 'support_request_prompt')
-    if isinstance(callback.message, Message):
-        await callback.message.answer(text, reply_markup=builder.as_markup())
-    else:
+    
+    if callback.message:
         await callback.message.edit_text(text, reply_markup=builder.as_markup())
-    await callback.answer()
+    else:
+        await bot.send_message(callback.from_user.id, text, reply_markup=builder.as_markup())
+
+    # ИЗМЕНЕНО: Вызываем answer только если это реальный коллбэк
+    if callback.message:
+        await callback.answer()
 
 
 # Шаг 2: Пользователь отправляет свое сообщение
@@ -115,8 +119,7 @@ async def cancel_support(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 @router.message(Command("support"))
-async def support_command_handler(message: Message, state: FSMContext):
+async def support_command_handler(message: Message, state: FSMContext, bot: Bot):
     """Обработчик команды /support для связи с техподдержкой."""
-    # Создаем "фейковый" коллбэк
-    callback_mock = CallbackQuery(id="mock", from_user=message.from_user, chat_instance="mock", message=message, data="support")
-    await start_support_request(callback_mock, state)
+    callback_mock = CallbackQuery(id="mock_support", from_user=message.from_user, chat_instance="mock", message=None, data="support")
+    await start_support_request(callback_mock, state, bot)

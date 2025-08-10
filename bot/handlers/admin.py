@@ -1,6 +1,7 @@
+# -*- coding: utf-8 -*-
 import asyncio
 import logging
-from aiogram import Router, F, Bot
+from aiogram import Router, F, Bot, types
 from aiogram.filters import Filter, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
@@ -21,6 +22,22 @@ class IsAdmin(Filter):
     async def __call__(self, message: Message) -> bool:
         return message.from_user.id in self.admin_ids
 
+# ИЗМЕНЕНО: Добавлена вспомогательная функция для проверки и добавления админа в БД
+async def ensure_user_in_db(user: types.User, db_pool: asyncpg.Pool):
+    """Проверяет, есть ли пользователь в таблице users, и если нет - добавляет."""
+    async with db_pool.acquire() as conn:
+        # ON CONFLICT DO NOTHING - элегантный способ избежать ошибки, если юзер уже есть
+        await conn.execute(
+            """
+            INSERT INTO users (user_id, username, language_code) 
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id) DO NOTHING
+            """,
+            user.id,
+            user.username or '',
+            user.language_code or 'ru' # По умолчанию 'ru' для админов
+        )
+
 # Создаем роутер, который будет работать только для админов
 router = Router()
 router.message.filter(IsAdmin())
@@ -37,9 +54,13 @@ async def get_admin_keyboard(lang_code: str) -> InlineKeyboardBuilder:
     builder.row(InlineKeyboardButton(text="🎁 Промокоды", callback_data="admin_promo_menu"))
     return builder
 
+# ИЗМЕНЕНО: Добавлен db_pool и вызов функции ensure_user_in_db
 @router.message(Command("admin"))
-async def admin_panel_handler(message: Message):
+async def admin_panel_handler(message: Message, db_pool: asyncpg.Pool):
     """Обработчик команды /admin, показывает панель администратора."""
+    # При входе в админку гарантируем, что админ есть в таблице users
+    await ensure_user_in_db(message.from_user, db_pool)
+    
     lang_code = 'ru' # Админка пока только на одном языке для простоты
     keyboard = await get_admin_keyboard(lang_code)
     await message.answer("Добро пожаловать в панель администратора!", reply_markup=keyboard.as_markup())
@@ -54,7 +75,7 @@ async def admin_stats_handler(callback: CallbackQuery, db_pool: asyncpg.Pool):
         active_scenarios = await conn.fetchval("SELECT COUNT(*) FROM posting_scenarios WHERE is_active = TRUE")
         
     stats_text = (
-        "<b>📊 Статистика Бота</b>\n\n"
+        f"<b>📊 Статистика Бота</b>\n\n"
         f"👥 Всего пользователей: <b>{total_users}</b>\n"
         f"📢 Всего каналов: <b>{total_channels}</b>\n"
         f"⚙️ Всего сценариев: <b>{total_scenarios}</b> (<i>{active_scenarios} активно</i>)"
@@ -62,10 +83,9 @@ async def admin_stats_handler(callback: CallbackQuery, db_pool: asyncpg.Pool):
     await callback.message.edit_text(stats_text)
     await callback.answer()
 
-# --- [ПЕРЕПИСАННЫЙ БЛОК РАССЫЛКИ] ---
+# --- [БЛОК РАССЫЛКИ] ---
 
 async def _send_broadcast_message(bot: Bot, user_id: int, from_chat_id: int, message_id: int) -> bool:
-    """Вспомогательная функция для надежной отправки сообщения в рассылке."""
     try:
         await bot.copy_message(chat_id=user_id, from_chat_id=from_chat_id, message_id=message_id)
         return True
@@ -132,7 +152,7 @@ async def cancel_broadcast_handler(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# --- [НОВЫЙ БЛОК: ПРЯМОЕ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЮ] ---
+# --- [БЛОК: ПРЯМОЕ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЮ] ---
 
 @router.callback_query(F.data == "admin_direct_message")
 async def start_direct_message_handler(callback: CallbackQuery, state: FSMContext):
@@ -187,10 +207,10 @@ async def cancel_direct_message_handler(callback: CallbackQuery, state: FSMConte
     await callback.message.edit_text("Отправка сообщения отменена.")
     await callback.answer()
 
-# --- [НОВЫЙ БЛОК: УПРАВЛЕНИЕ ПРОМОКОДАМИ] ---
+# --- [БЛОК: УПРАВЛЕНИЕ ПРОМОКОДАМИ] ---
 
 @router.callback_query(F.data == "admin_promo_menu")
-async def promo_menu_handler(callback: CallbackQuery, db_pool: asyncpg.Pool):
+async def promo_menu_handler(callback: CallbackQuery, db_pool: asyncpg.Pool, bot: Bot):
     async with db_pool.acquire() as conn:
         promo_codes = await conn.fetch("SELECT * FROM promo_codes ORDER BY created_at DESC")
     
@@ -206,8 +226,14 @@ async def promo_menu_handler(callback: CallbackQuery, db_pool: asyncpg.Pool):
     builder.row(InlineKeyboardButton(text="⊕ Создать новый", callback_data="promo_create_start"))
     builder.row(InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="back_to_admin"))
     
-    await callback.message.edit_text(text, reply_markup=builder.as_markup())
-    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    else:
+        await bot.send_message(callback.from_user.id, text, reply_markup=builder.as_markup())
+
+    if callback.message:
+        await callback.answer()
+
 
 @router.callback_query(F.data == "back_to_admin")
 async def back_to_admin_handler(callback: CallbackQuery):
@@ -237,7 +263,7 @@ async def process_promo_generations(message: Message, state: FSMContext):
     await message.answer("<b>Шаг 3/3:</b> Сколько раз можно будет использовать этот промокод (общий лимит)?")
 
 @router.message(PromoCodeCreation.waiting_for_uses)
-async def process_promo_uses(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
+async def process_promo_uses(message: Message, state: FSMContext, db_pool: asyncpg.Pool, bot: Bot):
     if not message.text.isdigit() or int(message.text) <= 0:
         await message.reply("Пожалуйста, введите положительное число.")
         return
@@ -258,30 +284,22 @@ async def process_promo_uses(message: Message, state: FSMContext, db_pool: async
     except asyncpg.UniqueViolationError:
         await message.answer("❌ Ошибка: промокод с таким названием уже существует.")
     except Exception as e:
+        # Теперь здесь будет выводиться понятное сообщение об ошибке
         await message.answer(f"❌ Произошла непредвиденная ошибка: {e}")
     
     await state.clear()
     
-    # "Фейковый" коллбэк для возврата в меню
-    # Создаем объект Message, похожий на тот, что был бы у callback.message
-    mock_message = Message(message_id=0, date=message.date, chat=message.chat)
-    cb_mock = CallbackQuery(id="mock", from_user=message.from_user, chat_instance="mock", message=mock_message, data="admin_promo_menu")
-    await promo_menu_handler(cb_mock, db_pool)
+    cb_mock = CallbackQuery(id="mock_promo_menu", from_user=message.from_user, chat_instance="mock", data="admin_promo_menu", message=None)
+    await promo_menu_handler(cb_mock, db_pool, bot)
 
 
 # --- Обработчик для проверки "здоровья" бота ---
 @router.message(Command("health"))
 async def health_check_handler(message: Message, db_pool: asyncpg.Pool, scheduler: AsyncIOScheduler):
-    """
-    Проверяет состояние ключевых систем:
-    1. Подключение к базе данных.
-    2. Статус планировщика задач.
-    """
     db_status = "❌ Ошибка"
     db_error = ""
     scheduler_status = "❌ Ошибка"
     
-    # 1. Проверка базы данных
     try:
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
@@ -290,7 +308,6 @@ async def health_check_handler(message: Message, db_pool: asyncpg.Pool, schedule
         db_error = str(e)
         logging.error(f"Health Check: DB connection failed: {e}")
 
-    # 2. Проверка планировщика
     try:
         if scheduler.running:
             scheduler_status = "✅ OK (запущен)"
@@ -299,7 +316,6 @@ async def health_check_handler(message: Message, db_pool: asyncpg.Pool, schedule
     except Exception as e:
         scheduler_status = f"❌ Ошибка: {e}"
 
-    # Формируем отчет
     health_report = (
         "<b>🩺 Отчет о состоянии бота</b>\n\n"
         f"<b>База данных (PostgreSQL):</b> {db_status}\n"

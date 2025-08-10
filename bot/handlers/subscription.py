@@ -21,18 +21,20 @@ async def get_user_language(user_id: int, db_pool: asyncpg.Pool) -> str:
 
 # ГЛАВНЫЙ ОБРАБОТЧИК МЕНЮ ПОДПИСКИ
 @router.callback_query(F.data == "subscription")
-async def subscription_menu_handler(callback: CallbackQuery, db_pool: asyncpg.Pool):
+async def subscription_menu_handler(callback: CallbackQuery, db_pool: asyncpg.Pool, bot: Bot):
     user_id = callback.from_user.id
     lang_code = await get_user_language(user_id, db_pool)
     
     keyboard, text = await get_subscription_keyboard(user_id, lang_code, db_pool)
     
-    # Проверяем, это коллбэк или "фейковый" вызов из команды
-    if isinstance(callback.message, Message):
-        await callback.message.answer(text, reply_markup=keyboard)
-    else:
+    if callback.message:
         await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
+    else:
+        await bot.send_message(callback.from_user.id, text, reply_markup=keyboard)
+
+    # ИЗМЕНЕНО: Вызываем answer только если это реальный коллбэк
+    if callback.message:
+        await callback.answer()
 
 # ОБРАБОТЧИКИ ПОКУПКИ
 @router.callback_query(F.data.startswith("buy_pack_"))
@@ -42,6 +44,7 @@ async def buy_pack_handler(callback: CallbackQuery, bot: Bot, db_pool: asyncpg.P
     plan_key = callback.data.split("buy_pack_")[1]
     
     if plan_key not in PLANS:
+        await callback.answer("Plan not found.", show_alert=True)
         return
 
     plan_info = PLANS[plan_key]
@@ -78,7 +81,6 @@ async def successful_payment_handler(message: Message, db_pool: asyncpg.Pool):
     generations_to_add = plan_info["generations"]
     
     async with db_pool.acquire() as conn:
-        # Просто добавляем купленное количество генераций к текущему балансу
         await conn.execute(
             """
             UPDATE subscriptions 
@@ -95,8 +97,7 @@ async def successful_payment_handler(message: Message, db_pool: asyncpg.Pool):
 
 # --- [НОВАЯ БЫСТРАЯ КОМАНДА] ---
 @router.message(Command("balance"))
-async def balance_command_handler(message: Message, db_pool: asyncpg.Pool):
+async def balance_command_handler(message: Message, db_pool: asyncpg.Pool, bot: Bot):
     """Обработчик команды /balance для вызова меню подписки."""
-    # Создаем "фейковый" коллбэк, чтобы переиспользовать существующий хендлер
-    callback_mock = CallbackQuery(id="mock", from_user=message.from_user, chat_instance="mock", message=message, data="subscription")
-    await subscription_menu_handler(callback_mock, db_pool)
+    callback_mock = CallbackQuery(id="mock_balance", from_user=message.from_user, chat_instance="mock", message=None, data="subscription")
+    await subscription_menu_handler(callback_mock, db_pool, bot)
