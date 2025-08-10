@@ -22,11 +22,9 @@ class IsAdmin(Filter):
     async def __call__(self, message: Message) -> bool:
         return message.from_user.id in self.admin_ids
 
-# ИЗМЕНЕНО: Добавлена вспомогательная функция для проверки и добавления админа в БД
 async def ensure_user_in_db(user: types.User, db_pool: asyncpg.Pool):
     """Проверяет, есть ли пользователь в таблице users, и если нет - добавляет."""
     async with db_pool.acquire() as conn:
-        # ON CONFLICT DO NOTHING - элегантный способ избежать ошибки, если юзер уже есть
         await conn.execute(
             """
             INSERT INTO users (user_id, username, language_code) 
@@ -35,7 +33,7 @@ async def ensure_user_in_db(user: types.User, db_pool: asyncpg.Pool):
             """,
             user.id,
             user.username or '',
-            user.language_code or 'ru' # По умолчанию 'ru' для админов
+            user.language_code or 'ru'
         )
 
 # Создаем роутер, который будет работать только для админов
@@ -54,14 +52,11 @@ async def get_admin_keyboard(lang_code: str) -> InlineKeyboardBuilder:
     builder.row(InlineKeyboardButton(text="🎁 Промокоды", callback_data="admin_promo_menu"))
     return builder
 
-# ИЗМЕНЕНО: Добавлен db_pool и вызов функции ensure_user_in_db
 @router.message(Command("admin"))
 async def admin_panel_handler(message: Message, db_pool: asyncpg.Pool):
     """Обработчик команды /admin, показывает панель администратора."""
-    # При входе в админку гарантируем, что админ есть в таблице users
     await ensure_user_in_db(message.from_user, db_pool)
-    
-    lang_code = 'ru' # Админка пока только на одном языке для простоты
+    lang_code = 'ru'
     keyboard = await get_admin_keyboard(lang_code)
     await message.answer("Добро пожаловать в панель администратора!", reply_markup=keyboard.as_markup())
 
@@ -83,7 +78,7 @@ async def admin_stats_handler(callback: CallbackQuery, db_pool: asyncpg.Pool):
     await callback.message.edit_text(stats_text)
     await callback.answer()
 
-# --- [БЛОК РАССЫЛКИ] ---
+# --- БЛОК РАССЫЛКИ ---
 
 async def _send_broadcast_message(bot: Bot, user_id: int, from_chat_id: int, message_id: int) -> bool:
     try:
@@ -152,7 +147,7 @@ async def cancel_broadcast_handler(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# --- [БЛОК: ПРЯМОЕ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЮ] ---
+# --- БЛОК: ПРЯМОЕ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЮ ---
 
 @router.callback_query(F.data == "admin_direct_message")
 async def start_direct_message_handler(callback: CallbackQuery, state: FSMContext):
@@ -207,7 +202,7 @@ async def cancel_direct_message_handler(callback: CallbackQuery, state: FSMConte
     await callback.message.edit_text("Отправка сообщения отменена.")
     await callback.answer()
 
-# --- [БЛОК: УПРАВЛЕНИЕ ПРОМОКОДАМИ] ---
+# --- БЛОК: УПРАВЛЕНИЕ ПРОМОКОДАМИ ---
 
 @router.callback_query(F.data == "admin_promo_menu")
 async def promo_menu_handler(callback: CallbackQuery, db_pool: asyncpg.Pool, bot: Bot):
@@ -215,25 +210,55 @@ async def promo_menu_handler(callback: CallbackQuery, db_pool: asyncpg.Pool, bot
         promo_codes = await conn.fetch("SELECT * FROM promo_codes ORDER BY created_at DESC")
     
     text = "<b>🎁 Управление промокодами</b>\n\n"
+    builder = InlineKeyboardBuilder()
+
     if not promo_codes:
         text += "Промокодов еще не создано."
     else:
         for code in promo_codes:
-            status = "✅" if code['is_active'] and code['uses_left'] > 0 else "❌"
-            text += f"{status} <code>{code['promo_code']}</code>: +{code['generations_awarded']} gen, осталось {code['uses_left']}/{code['total_uses']} \n"
+            status = "✅ Активен" if code['is_active'] else "❌ Неактивен"
+            text += f"<code>{code['promo_code']}</code> | +{code['generations_awarded']} gen | {code['uses_left']}/{code['total_uses']} | {status}\n\n"
+            
+            toggle_text = "❌ Деактивировать" if code['is_active'] else "✅ Активировать"
+            builder.row(
+                InlineKeyboardButton(text=toggle_text, callback_data=f"promo_toggle_{code['id']}"),
+                InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"promo_delete_{code['id']}")
+            )
+            builder.row(InlineKeyboardButton(text="-"*20, callback_data="noop"))
     
-    builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="⊕ Создать новый", callback_data="promo_create_start"))
     builder.row(InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="back_to_admin"))
     
     if callback.message:
-        await callback.message.edit_text(text, reply_markup=builder.as_markup())
+        try:
+            await callback.message.edit_text(text, reply_markup=builder.as_markup())
+        except TelegramBadRequest: # Если сообщение не изменилось
+            pass
     else:
         await bot.send_message(callback.from_user.id, text, reply_markup=builder.as_markup())
-
+    
     if callback.message:
         await callback.answer()
 
+@router.callback_query(F.data.startswith("promo_toggle_"))
+async def toggle_promo_code_handler(callback: CallbackQuery, db_pool: asyncpg.Pool, bot: Bot):
+    promo_id = int(callback.data.split("_")[2])
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE promo_codes SET is_active = NOT is_active WHERE id = $1", promo_id)
+    await callback.answer("Статус промокода изменен.")
+    await promo_menu_handler(callback, db_pool, bot)
+
+@router.callback_query(F.data.startswith("promo_delete_"))
+async def delete_promo_code_handler(callback: CallbackQuery, db_pool: asyncpg.Pool, bot: Bot):
+    promo_id = int(callback.data.split("_")[2])
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM promo_codes WHERE id = $1", promo_id)
+    await callback.answer("Промокод удален.", show_alert=True)
+    await promo_menu_handler(callback, db_pool, bot)
+
+@router.callback_query(F.data == "noop")
+async def noop_handler(callback: CallbackQuery):
+    await callback.answer()
 
 @router.callback_query(F.data == "back_to_admin")
 async def back_to_admin_handler(callback: CallbackQuery):
@@ -284,7 +309,6 @@ async def process_promo_uses(message: Message, state: FSMContext, db_pool: async
     except asyncpg.UniqueViolationError:
         await message.answer("❌ Ошибка: промокод с таким названием уже существует.")
     except Exception as e:
-        # Теперь здесь будет выводиться понятное сообщение об ошибке
         await message.answer(f"❌ Произошла непредвиденная ошибка: {e}")
     
     await state.clear()

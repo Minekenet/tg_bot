@@ -12,8 +12,8 @@ services:
     restart: always
     depends_on:
       - db
+      - redis # Добавляем зависимость от Redis
     volumes:
-      # Пробрасываем папку с логами наружу, чтобы они не терялись при перезапуске контейнера
       - ./logs:/app/logs
 
   db:
@@ -30,7 +30,13 @@ services:
       - db_name
     restart: always
 
-  # --- [НОВЫЙ СЕРВИС ДЛЯ БЭКАПОВ] ---
+  # --- [НОВЫЙ СЕРВИС REDIS ДЛЯ FSM] ---
+  redis:
+    image: redis:7-alpine
+    restart: always
+    volumes:
+      - redis_data:/data
+
   backup:
     image: prodrigestivill/postgres-backup-local
     restart: always
@@ -41,24 +47,20 @@ services:
       - db_password
       - db_name
     environment:
-      POSTGRES_HOST: db # Имя сервиса базы данных
+      POSTGRES_HOST: db
       POSTGRES_DB_FILE: /run/secrets/db_name
       POSTGRES_USER_FILE: /run/secrets/db_user
       POSTGRES_PASSWORD_FILE: /run/secrets/db_password
-      # Расписание в формате cron. '@daily' означает "каждый день в полночь".
       SCHEDULE: '@daily'
-      # Хранить бэкапы за последние 7 дней. Старые будут автоматически удаляться.
       BACKUP_KEEP_DAYS: 7
-      # Формат имени файла бэкапа
       BACKUP_FILENAME: 'backup-%Y-%m-%d-%H-%M-%S.sql.gz'
     volumes:
-      # Монтируем новый том для хранения бэкапов
       - backups:/backups
 
 volumes:
   postgres_data:
-  # --- [НОВЫЙ ТОМ ДЛЯ БЭКАПОВ] ---
   backups:
+  redis_data: # Добавляем том для Redis, чтобы состояния не терялись
 
 secrets:
   bot_token:
