@@ -2,6 +2,7 @@ import asyncio
 import logging
 import logging.handlers
 import os
+import sys  # Импорт для логирования в консоль
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.redis import RedisStorage
@@ -20,18 +21,19 @@ def setup_logging():
     if not os.path.exists('logs'):
         os.makedirs('logs')
 
+    # ИЗМЕНЕНО: Логи теперь пишутся и в файл, и в консоль (для docker-compose logs)
     logging.basicConfig(
         level=logging.INFO,
-        format=log_format
+        format=log_format,
+        handlers=[
+            logging.handlers.TimedRotatingFileHandler(
+                'logs/bot.log', when='D', interval=1, backupCount=7, encoding='utf-8'
+            ),
+            logging.StreamHandler(sys.stdout)
+        ]
     )
 
     logger = logging.getLogger()
-
-    file_handler = logging.handlers.TimedRotatingFileHandler(
-        'logs/bot.log', when='D', interval=1, backupCount=7, encoding='utf-8'
-    )
-    file_handler.setFormatter(logging.Formatter(log_format))
-    logger.addHandler(file_handler)
 
     if config.ADMINS:
         telegram_handler = TelegramLogsHandler(bot_token=config.BOT_TOKEN, chat_id=config.ADMINS[0])
@@ -136,6 +138,16 @@ async def on_startup(pool: asyncpg.Pool):
                 is_active BOOLEAN DEFAULT TRUE,
                 created_by BIGINT REFERENCES users(user_id),
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        # ИЗМЕНЕНО: НОВАЯ ТАБЛИЦА ДЛЯ ПРЕДОТВРАЩЕНИЯ ПОВТОРНЫХ АКТИВАЦИЙ
+        await connection.execute("""
+            CREATE TABLE IF NOT EXISTS promo_code_activations (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                promo_code_id INTEGER NOT NULL REFERENCES promo_codes(id) ON DELETE CASCADE,
+                activated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, promo_code_id)
             );
         """)
     logging.info("Database tables are ready.")

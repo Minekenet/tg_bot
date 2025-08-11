@@ -68,21 +68,38 @@ async def _add_channel_logic(message: Message, bot: Bot, db_pool: asyncpg.Pool, 
             await message.reply(get_text(lang_code, 'forward_from_channel_required'))
             return False
 
+        # ПРОВЕРКА "ВЛАДЕНИЯ" КАНАЛОМ
+        async with db_pool.acquire() as connection:
+            existing_channel = await connection.fetchrow(
+                "SELECT owner_id FROM channels WHERE channel_id = $1", chat_info.id
+            )
+
+            if existing_channel:
+                if existing_channel['owner_id'] == user_id:
+                    await message.reply(get_text(lang_code, 'channel_already_added_by_you'))
+                else:
+                    await message.reply(get_text(lang_code, 'channel_already_added_by_other'))
+                await state.clear()
+                await show_channels_menu(message, db_pool)
+                return False
+
+        # Проверяем, является ли пользователь администратором в Telegram
         member = await bot.get_chat_member(chat_info.id, user_id)
         if not isinstance(member, (types.ChatMemberOwner, types.ChatMemberAdministrator)):
             await message.reply(get_text(lang_code, 'user_not_admin_error'))
             return False
-
+        
+        # Проверяем, является ли бот администратором в Telegram
         bot_member = await bot.get_chat_member(chat_info.id, bot.id)
         if not isinstance(bot_member, (types.ChatMemberOwner, types.ChatMemberAdministrator)):
             raise PermissionError("Not admin")
         if isinstance(bot_member, types.ChatMemberAdministrator) and not bot_member.can_post_messages:
             raise PermissionError("No post messages permission")
 
+        # Если все проверки пройдены, добавляем канал с текущим пользователем как "владельцем"
         async with db_pool.acquire() as connection:
             await connection.execute(
-                "INSERT INTO channels (channel_id, channel_name, owner_id) VALUES ($1, $2, $3) "
-                "ON CONFLICT (channel_id) DO UPDATE SET channel_name = EXCLUDED.channel_name, owner_id = EXCLUDED.owner_id;",
+                "INSERT INTO channels (channel_id, channel_name, owner_id) VALUES ($1, $2, $3)",
                 chat_info.id, chat_info.title, user_id
             )
         
@@ -509,7 +526,6 @@ async def start_description_input(callback: Message | CallbackQuery, state: FSMC
     else:
         await callback.answer(text)
 
-# ИЗМЕНЕНО: Обработчик теперь слушает ДВА состояния
 @router.message(StateFilter(Onboarding.waiting_for_description, ChannelDescription.waiting_for_description))
 async def process_activity_description(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
     lang_code = await get_user_language(message.from_user.id, db_pool)
@@ -570,7 +586,6 @@ async def manage_generation_language_entry(callback: CallbackQuery, state: FSMCo
     await state.update_data(channel_id=channel_id)
     await manage_generation_language(callback, state, db_pool)
 
-# ИЗМЕНЕНО: Обработчик теперь слушает ДВА состояния
 @router.message(StateFilter(Onboarding.waiting_for_language, ChannelLanguage.waiting_for_language))
 async def set_generation_language(message: Message, state: FSMContext, db_pool: asyncpg.Pool):
     data = await state.get_data()

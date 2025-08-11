@@ -163,5 +163,9 @@
     "admin_broadcast_button": "📣 Broadcast",
     "promo_enter_code_prompt": "Enter your promo code:",
     "promo_not_found_or_expired": "❌ Promo code not found, inactive, or its usage limit has been reached.",
-    "promo_success": "✅ Promo code successfully activated! You have been credited with {count} generations."
+    "promo_success": "✅ Promo code successfully activated! You have been credited with {count} generations.",
+    "no_news_found_job_error": "🚫 Scenario «{scenario_name}»: Search found no suitable results. Task completed.",
+    "no_unique_news_found_job_error": "🚫 Scenario «{scenario_name}»: Search found results, but all news has already been published.",
+    "error_ai_selection": "❌ AI article selection error. Search completed. Error: {error}",
+    "error_ai_generation": "❌ AI post generation error. Search completed. Error: {error}"
 }

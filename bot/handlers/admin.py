@@ -1,3 +1,5 @@
+# bot/handlers/admin.py
+
 # -*- coding: utf-8 -*-
 import asyncio
 import logging
@@ -52,13 +54,27 @@ async def get_admin_keyboard(lang_code: str) -> InlineKeyboardBuilder:
     builder.row(InlineKeyboardButton(text="🎁 Промокоды", callback_data="admin_promo_menu"))
     return builder
 
+# ИЗМЕНЕНО: Функция переименована и теперь может принимать CallbackQuery для редактирования
+async def show_admin_panel(event: Message | CallbackQuery, lang_code: str = 'ru'):
+    """Показывает главную панель администратора."""
+    keyboard = await get_admin_keyboard(lang_code)
+    text = "Добро пожаловать в панель администратора!"
+    if isinstance(event, CallbackQuery):
+        # Используем try-except на случай, если сообщение не изменилось
+        try:
+            await event.message.edit_text(text, reply_markup=keyboard.as_markup())
+        except TelegramBadRequest:
+            pass
+        await event.answer()
+    else:
+        await event.answer(text, reply_markup=keyboard.as_markup())
+
 @router.message(Command("admin"))
 async def admin_panel_handler(message: Message, db_pool: asyncpg.Pool):
     """Обработчик команды /admin, показывает панель администратора."""
     await ensure_user_in_db(message.from_user, db_pool)
-    lang_code = 'ru'
-    keyboard = await get_admin_keyboard(lang_code)
-    await message.answer("Добро пожаловать в панель администратора!", reply_markup=keyboard.as_markup())
+    await show_admin_panel(message)
+
 
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats_handler(callback: CallbackQuery, db_pool: asyncpg.Pool):
@@ -75,7 +91,11 @@ async def admin_stats_handler(callback: CallbackQuery, db_pool: asyncpg.Pool):
         f"📢 Всего каналов: <b>{total_channels}</b>\n"
         f"⚙️ Всего сценариев: <b>{total_scenarios}</b> (<i>{active_scenarios} активно</i>)"
     )
-    await callback.message.edit_text(stats_text)
+    # ИЗМЕНЕНО: Добавляем кнопку "Назад"
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="back_to_admin"))
+    
+    await callback.message.edit_text(stats_text, reply_markup=builder.as_markup())
     await callback.answer()
 
 # --- БЛОК РАССЫЛКИ ---
@@ -140,11 +160,12 @@ async def confirm_broadcast_handler(callback: CallbackQuery, state: FSMContext, 
         f"Не удалось отправить: {failed_count} (пользователи заблокировали бота)"
     )
 
+# ИСПРАВЛЕНО: Отмена рассылки возвращает в админ-панель
 @router.callback_query(F.data == "cancel_broadcast", BroadcastState.confirming_message)
 async def cancel_broadcast_handler(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("Рассылка отменена.")
-    await callback.answer()
+    await callback.answer("Рассылка отменена.", show_alert=False)
+    await show_admin_panel(callback)
 
 
 # --- БЛОК: ПРЯМОЕ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЮ ---
@@ -196,11 +217,12 @@ async def confirm_direct_message_handler(callback: CallbackQuery, state: FSMCont
         await callback.message.edit_text(f"❌ Не удалось отправить сообщение.\nОшибка: {e}")
     await callback.answer()
 
+# ИСПРАВЛЕНО: Отмена отправки прямого сообщения возвращает в админ-панель
 @router.callback_query(F.data == "cancel_direct_message")
 async def cancel_direct_message_handler(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("Отправка сообщения отменена.")
-    await callback.answer()
+    await callback.answer("Отправка сообщения отменена.", show_alert=False)
+    await show_admin_panel(callback)
 
 # --- БЛОК: УПРАВЛЕНИЕ ПРОМОКОДАМИ ---
 
@@ -260,11 +282,11 @@ async def delete_promo_code_handler(callback: CallbackQuery, db_pool: asyncpg.Po
 async def noop_handler(callback: CallbackQuery):
     await callback.answer()
 
+# ИСПРАВЛЕНО: Этот обработчик теперь просто вызывает стандартизированную функцию
 @router.callback_query(F.data == "back_to_admin")
 async def back_to_admin_handler(callback: CallbackQuery):
-    keyboard = await get_admin_keyboard('ru')
-    await callback.message.edit_text("Добро пожаловать в панель администратора!", reply_markup=keyboard.as_markup())
-    await callback.answer()
+    await show_admin_panel(callback)
+
 
 @router.callback_query(F.data == "promo_create_start")
 async def start_promo_creation(callback: CallbackQuery, state: FSMContext):

@@ -1,12 +1,17 @@
+# bot/handlers/support.py
+
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+import asyncpg
 
 from bot.utils.states import SupportRequest
 from bot.utils.localization import get_text
 from bot import config
+# ИЗМЕНЕНО: Импортируем функцию для показа главного меню
+from bot.handlers.start import show_main_menu
 
 router = Router()
 
@@ -30,7 +35,6 @@ async def start_support_request(callback: CallbackQuery, state: FSMContext, bot:
     else:
         await bot.send_message(callback.from_user.id, text, reply_markup=builder.as_markup())
 
-    # ИЗМЕНЕНО: Вызываем answer только если это реальный коллбэк
     if callback.message:
         await callback.answer()
 
@@ -110,13 +114,15 @@ async def send_reply_to_user(message: Message, state: FSMContext, bot: Bot):
     
     await state.clear()
 
-# Обработка отмены
+# ИСПРАВЛЕНО: Отмена запроса в техподдержку теперь возвращает в главное меню.
 @router.callback_query(F.data == "cancel_support_request")
-async def cancel_support(callback: CallbackQuery, state: FSMContext):
+async def cancel_support(callback: CallbackQuery, state: FSMContext, db_pool: asyncpg.Pool):
     lang_code = callback.from_user.language_code or 'ru'
     await state.clear()
-    await callback.message.edit_text(get_text(lang_code, 'action_cancelled'))
-    await callback.answer()
+    await callback.answer(get_text(lang_code, 'action_cancelled'), show_alert=False)
+    # Возвращаем пользователя в главное меню
+    await show_main_menu(callback, lang_code)
+
 
 @router.message(Command("support"))
 async def support_command_handler(message: Message, state: FSMContext, bot: Bot):
