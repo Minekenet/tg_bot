@@ -24,8 +24,12 @@ def get_secret(secret_name: str, default: str = None) -> str:
 # --- Загружаем все наши секреты ---
 BOT_TOKEN = get_secret("bot_token")
 ADMIN_USER_IDS = get_secret("admin_user_ids", "")
-SERPER_API_KEY = get_secret("serper_api_key")
-AI_STUDIO_API_KEY = get_secret("ai_studio_api_key")
+XMLRIVER_API_KEY = get_secret("xmlriver_api_key")
+XMLRIVER_USER_ID = get_secret("xmlriver_user_id", "18601") # Добавляем user_id для XMLRiver
+
+OPENROUTER_API_KEY = get_secret("openrouter_api_key")
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+OPENROUTER_MODEL = "google/gemini-2.0-flash-exp:free"
 
 DB_USER = get_secret("db_user")
 DB_PASSWORD = get_secret("db_password")
@@ -36,6 +40,14 @@ DB_HOST = os.getenv("DB_HOST", "db")
 
 # --- Преобразуем список админов в нужный формат ---
 ADMINS = [int(admin_id.strip()) for admin_id in ADMIN_USER_IDS.split(',') if admin_id.strip()]
+
+# --- Константы стоимости --- 
+SEARCH_QUERY_COST = 0.02 # Рублей за один поисковый запрос
+AI_TOKEN_COST_PER_1000 = 0.2 # Рубль за 1000 токенов AI
+MAX_CHARS_FOR_PASSPORT = 3000 # Максимальное количество символов для "Паспорта стиля" AI
+
+XMLRIVER_API_KEY = get_secret("xmlriver_api_key")
+XMLRIVER_NEWS_URL = "http://xmlriver.com/search/xml"
 
 # --- Проверка наличия ключевых токенов ---
 if not BOT_TOKEN:

@@ -19,14 +19,15 @@ from bot.keyboards.inline import (
     get_onboarding_final_keyboard
 )
 from bot.utils.ai_generator import generate_style_passport_from_text
+from bot import config
 
 router = Router()
 
 # --- Константы и вспомогательные функции ---
 MAX_POSTS_FOR_PASSPORT = 10
-MAX_CHARS_FOR_PASSPORT = 10000
+MAX_CHARS_FOR_PASSPORT = 3000
 MAX_CHARS_FOR_DESCRIPTION = 2000
-PASSPORT_UPDATE_COOLDOWN = datetime.timedelta(days=3)
+PASSPORT_UPDATE_COOLDOWN = datetime.timedelta(days=1)
 
 async def get_user_language(user_id: int, db_pool: asyncpg.Pool) -> str:
     if db_pool:
@@ -442,9 +443,12 @@ async def process_style_passport(callback: CallbackQuery, state: FSMContext, db_
     await callback.message.edit_text(get_text(lang_code, 'style_passport_generating'))
     await callback.answer()
 
-    success, passport_text = await generate_style_passport_from_text(posts_text)
+    success, passport_text, token_count = await generate_style_passport_from_text(posts_text, lang_code)
 
     if success:
+        cost = (token_count / 1000) * config.AI_TOKEN_COST_PER_1000
+        logging.info(f"Сгенерирован паспорт стиля для канала {channel_id}. Токены: {token_count}, Стоимость: {cost:.2f} руб.")
+        
         async with db_pool.acquire() as conn:
             await conn.execute(
                 "UPDATE channels SET style_passport = $1, style_passport_updated_at = NOW() WHERE channel_id = $2",
@@ -563,7 +567,9 @@ async def manage_generation_language(message: Message | CallbackQuery, state: FS
     async with db_pool.acquire() as conn:
         current_lang = await conn.fetchval(
             "SELECT generation_language FROM channels WHERE channel_id = $1", channel_id
-        ) or lang_code
+        )
+        if not current_lang:
+            current_lang = get_text(lang_code, 'generation_language_not_set')
     
     await state.set_state(ChannelLanguage.waiting_for_language)
     

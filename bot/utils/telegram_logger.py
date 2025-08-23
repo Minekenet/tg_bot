@@ -1,13 +1,12 @@
 import logging
 import asyncio
 from aiogram import Bot
-from aiogram.client.default import DefaultBotProperties
 
 class TelegramLogsHandler(logging.Handler):
     def __init__(self, bot_token: str, chat_id: int):
         super().__init__()
         self.chat_id = chat_id
-        self.bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode="HTML"))
+        self.bot = Bot(token=bot_token, parse_mode="HTML")
 
     def emit(self, record: logging.LogRecord):
         log_entry = self.format(record)

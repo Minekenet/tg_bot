@@ -1,73 +1,154 @@
 # bot/utils/ai_generator.py
 
-import google.generativeai as genai
-from bot import config
+import json
+import aiohttp
 import logging
+from bot import config
+from bot.utils.localization import get_text # Импортируем здесь, чтобы избежать циклической зависимости
 
-try:
-    AI_STUDIO_API_KEY = config.AI_STUDIO_API_KEY
-    
-    if not AI_STUDIO_API_KEY:
-        raise ValueError("AI_STUDIO_API_KEY не найден в секретах или .env.")
+# OpenRouter API settings
+OPENROUTER_API_KEY = config.OPENROUTER_API_KEY
+OPENROUTER_API_BASE = config.OPENROUTER_API_BASE
+OPENROUTER_MODEL = config.OPENROUTER_MODEL
 
-    genai.configure(api_key=AI_STUDIO_API_KEY)
-    
-    gemini_flash_model = genai.GenerativeModel('gemini-1.5-flash-latest')
-    
-    logging.info("✅ Инициализация с API-ключом Google AI Studio прошла успешно.")
-
-except Exception as e:
-    logging.critical(f"КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать модель Gemini. Ошибка: {e}", exc_info=True)
-    gemini_flash_model = None
-
-async def generate_content_robust(prompt: str) -> tuple[bool, str]:
+async def generate_content_robust(prompt: str) -> tuple[bool, str, int]:
     """
-    Универсальная функция для генерации контента с обработкой ошибок.
+    Универсальная функция для генерации контента с обработкой ошибок через OpenRouter.
+    Возвращает статус успеха, сгенерированный текст и количество токенов.
     """
-    if not gemini_flash_model:
-        return False, "Модель Gemini не была инициализирована. Проверьте логи сервера."
+    if not OPENROUTER_API_KEY:
+        logging.critical("КРИТИЧЕСКАЯ ОШИБКА: OPENROUTER_API_KEY не найден. Генерация ИИ невозможна.")
+        return False, "API ключ OpenRouter не найден.", 0
+    
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://localhost:3000", # Можно заменить на реальный URL вашего приложения
+    }
+
+    # OpenRouter использует формат OpenAI Chat Completions
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7, # можно настроить
+    }
+
+    logging.info(f"Отправка запроса к OpenRouter API. Модель: {OPENROUTER_MODEL}")
 
     try:
-        # Устанавливаем разумный таймаут
-        response = await gemini_flash_model.generate_content_async(prompt, request_options={'timeout': 60})
-        
-        # Проверяем наличие текста в ответе
-        if not response.text:
-            return False, "Gemini вернул пустой ответ."
-        
-        generated_text = response.text
-        return True, generated_text
-    
-    except genai.types.BlockedPromptException as e:
-        error_message = f"Запрос к ИИ заблокирован: {e}"
-        logging.error(error_message, exc_info=True)
-        return False, error_message
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{OPENROUTER_API_BASE}/chat/completions", headers=headers, json=payload, timeout=60) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    # Проверяем наличие текста в ответе
+                    if not data.get("choices") or not data["choices"][0].get("message") or not data["choices"][0]["message"].get("content"):
+                        logging.error(f"OpenRouter вернул пустой или некорректный ответ: {data}")
+                        return False, "OpenRouter вернул пустой или некорректный ответ.", 0
+                    
+                    generated_text = data["choices"][0]["message"]["content"]
+                    token_count = data.get("usage", {}).get("total_tokens", 0)
+                    logging.info(f"Успешная генерация контента от OpenRouter. Токенов использовано: {token_count}")
+                    return True, generated_text, token_count
+                else:
+                    error_text = await response.text()
+                    logging.error(f"Ошибка OpenRouter API: Статус {response.status}, Тело ответа: {error_text}")
+                    return False, f"Ошибка OpenRouter API: {error_text}", 0
+    except aiohttp.ClientError as e:
+        error_message = f"Ошибка сетевого запроса к OpenRouter: {e}"
+        logging.critical(error_message, exc_info=True)
+        return False, error_message, 0
     except Exception as e:
-        error_message = f"Произошла ошибка при генерации контента: {e}"
-        logging.error(error_message, exc_info=True)
-        return False, error_message
+        error_message = f"Произошла непредвиденная ошибка при генерации контента через OpenRouter: {e}"
+        logging.critical(error_message, exc_info=True)
+        return False, error_message, 0
 
-async def generate_style_passport_from_text(posts_text: str) -> tuple[bool, str]:
+def is_article_url(url: str) -> bool:
     """
-    Генерирует "Паспорт стиля" из предоставленного текста постов.
-    Использует новую функцию generate_content_robust
+    Проверяет, является ли URL ссылкой на конкретную статью (а не на главную страницу).
+    Простая эвристика: URL должен содержать как минимум один сегмент пути после домена
+    или иметь явное расширение файла.
     """
-    prompt = f"""
-    Твоя задача - выступить в роли опытного контент-аналитика. Проанализируй следующие посты из Telegram-канала. На основе их стиля, тона и содержания, создай детальный, но краткий "Паспорт стиля" в формате Markdown.
+    # Разбираем URL
+    from urllib.parse import urlparse
+    parsed_url = urlparse(url)
 
-    Паспорт должен включать следующие разделы:
-    - **Tone of Voice (Тон голоса):** (например: "Экспертный, но дружелюбный и с юмором", "Строго-формальный, деловой", "Провокационный и молодежный").
-    - **Ключевые темы:** (Перечисли основные темы, о которых пишет автор).
-    - **Структура и формат постов:** (Опиши типичную структуру: есть ли заголовки, используются ли списки, эмодзи, какая средняя длина постов).
-    - **Целевая аудитория:** (Опиши, для кого, скорее всего, предназначены эти посты).
-    - **Примеры удачных фраз или оборотов:** (Приведи 2-3 цитаты из текста, которые хорошо отражают стиль).
+    # Если нет пути или путь это просто один слэш, считаем главной страницей
+    if not parsed_url.path or parsed_url.path == '/':
+        return False
 
-    Вот посты для анализа:
-    ---
-    {posts_text}
-    ---
+    # Если путь имеет несколько сегментов (например, /category/article)
+    # или если есть расширение файла (например, .html, .php)
+    # Эту логику можно уточнить при необходимости
+    path_segments = [segment for segment in parsed_url.path.split('/') if segment]
+    if len(path_segments) > 0 and '.' in path_segments[-1]: # Предполагаем, что есть файл
+        return True
+    if len(path_segments) > 1: # Более одного сегмента пути (e.g., /category/article)
+        return True
 
-    Создай "Паспорт стиля". Ответ должен быть только в формате Markdown.
+    # Исключаем URL, которые выглядят как главные страницы, но с добавлением языка, например, /ru/
+    # Это уже покрывается `len(path_segments) > 0` и `parsed_url.path == '/'`
+
+    return False
+
+async def generate_style_passport_from_text(posts_text: str, lang_code: str) -> tuple[bool, str, int]:
     """
+    Генерирует "Паспорт стиля" из предоставленного текста постов на указанном языке.
+    """
+    from bot.config import MAX_CHARS_FOR_PASSPORT
 
-    return await generate_content_robust(prompt)
+    prompt = get_text(lang_code, "style_passport_ai_prompt", 
+                       MAX_CHARS_FOR_PASSPORT=MAX_CHARS_FOR_PASSPORT, 
+                       posts_text=posts_text)
+    
+    success, passport_text, token_count = await generate_content_robust(prompt)
+    
+    return success, passport_text, token_count
+
+async def select_best_articles_from_search_results(articles: list[dict], lang_code: str) -> tuple[bool, list[str], int]:
+    """
+    Использует ИИ для выбора 3 лучших статей из списка результатов поиска.
+    Возвращает статус успеха, список URL выбранных статей и количество токенов.
+    """
+    if not articles:
+        return True, [], 0
+
+    # Фильтруем входные статьи, оставляя только те, что ведут на конкретные статьи
+    filtered_input_articles = [article for article in articles if is_article_url(article.get('url', ''))]
+
+    if not filtered_input_articles:
+        logging.warning("После фильтрации корневых ссылок не осталось статей для выбора ИИ.")
+        return True, [], 0
+
+    formatted_articles = []
+    for i, article in enumerate(filtered_input_articles):
+        formatted_articles.append(
+            f"Article {i+1}:\n"
+            f"URL: {article.get('url')}\n"
+            f"Title: {article.get('title')}\n"
+            f"Snippet: {article.get('passages')}\n"
+        )
+    
+    articles_list_str = "\n---\n".join(formatted_articles)
+    
+    prompt = get_text(lang_code, "article_selection_ai_prompt", articles_list=articles_list_str)
+    
+    success, raw_response, token_count = await generate_content_robust(prompt)
+    
+    if success:
+        try:
+            selected_urls = json.loads(raw_response)
+            # Убедимся, что это список строк и не более 3-х элементов
+            if isinstance(selected_urls, list) and all(isinstance(url, str) for url in selected_urls):
+                # Удаляем пост-фильтрацию, так как входные статьи уже отфильтрованы.
+                # filtered_urls = [url for url in selected_urls if is_article_url(url)]
+                return True, selected_urls[:3], token_count
+            else:
+                logging.error(f"ИИ вернул некорректный формат для выбора статей: {raw_response}")
+                return False, [], token_count
+        except json.JSONDecodeError as e:
+            logging.error(f"Ошибка парсинга JSON от ИИ при выборе статей: {e}. Ответ: {raw_response}")
+            return False, [], token_count
+    else:
+        return False, [], token_count

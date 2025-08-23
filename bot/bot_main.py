@@ -2,11 +2,11 @@ import asyncio
 import logging
 import logging.handlers
 import os
-import sys  # Импорт для логирования в консоль
+import sys
 from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.redis import RedisStorage
 import asyncpg
+import functools
 
 from bot import config
 from bot.handlers import start, channels, subscription, scenarios, admin, support, help, promo
@@ -21,19 +21,21 @@ def setup_logging():
     if not os.path.exists('logs'):
         os.makedirs('logs')
 
-    # ИЗМЕНЕНО: Логи теперь пишутся и в файл, и в консоль (для docker-compose logs)
-    logging.basicConfig(
-        level=logging.INFO,
-        format=log_format,
-        handlers=[
-            logging.handlers.TimedRotatingFileHandler(
-                'logs/bot.log', when='D', interval=1, backupCount=7, encoding='utf-8'
-            ),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
-
     logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(logging.Formatter(log_format))
+    logger.addHandler(stream_handler)
+
+    file_handler = logging.handlers.TimedRotatingFileHandler(
+        'logs/bot.log', when='D', interval=1, backupCount=7, encoding='utf-8'
+    )
+    file_handler.setFormatter(logging.Formatter(log_format))
+    logger.addHandler(file_handler)
 
     if config.ADMINS:
         telegram_handler = TelegramLogsHandler(bot_token=config.BOT_TOKEN, chat_id=config.ADMINS[0])
@@ -41,7 +43,7 @@ def setup_logging():
         telegram_handler.setFormatter(logging.Formatter(f"<b>Bot Alert!</b>\n<pre>{log_format}</pre>"))
         logger.addHandler(telegram_handler)
 
-    logging.info("Logging system configured.")
+    logging.info("Logging system configured successfully.")
 
 
 async def create_db_connection_pool():
@@ -56,7 +58,6 @@ async def create_db_connection_pool():
 async def on_startup(pool: asyncpg.Pool):
     """Выполняет действия при старте бота, например, создает таблицы в БД."""
     async with pool.acquire() as connection:
-        # Таблица пользователей
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -66,7 +67,6 @@ async def on_startup(pool: asyncpg.Pool):
                 registration_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        # Таблица папок
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS folders (
                 id SERIAL PRIMARY KEY,
@@ -75,7 +75,6 @@ async def on_startup(pool: asyncpg.Pool):
                 UNIQUE(owner_id, folder_name)
             );
         """)
-        # Таблица каналов
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS channels (
                 id SERIAL PRIMARY KEY,
@@ -90,7 +89,6 @@ async def on_startup(pool: asyncpg.Pool):
                 added_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        # Таблица подписок
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS subscriptions (
                 user_id BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
@@ -98,7 +96,7 @@ async def on_startup(pool: asyncpg.Pool):
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        # Таблица для сценариев авто-постинга
+        # Удален столбец `sources`
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS posting_scenarios (
                 id SERIAL PRIMARY KEY,
@@ -108,7 +106,6 @@ async def on_startup(pool: asyncpg.Pool):
                 theme TEXT,
                 is_active BOOLEAN DEFAULT TRUE,
                 keywords TEXT,
-                sources TEXT,
                 media_strategy VARCHAR(50) DEFAULT 'text_plus_media',
                 posting_mode VARCHAR(50) DEFAULT 'direct',
                 run_times TEXT,
@@ -117,7 +114,6 @@ async def on_startup(pool: asyncpg.Pool):
                 UNIQUE(channel_id, scenario_name)
             );
         """)
-        # Таблица для предотвращения дубликатов
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS published_posts (
                 id SERIAL PRIMARY KEY,
@@ -127,7 +123,6 @@ async def on_startup(pool: asyncpg.Pool):
                 UNIQUE(channel_id, source_url_hash)
             );
         """)
-        # Таблица для промокодов
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS promo_codes (
                 id SERIAL PRIMARY KEY,
@@ -140,7 +135,6 @@ async def on_startup(pool: asyncpg.Pool):
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        # ИЗМЕНЕНО: НОВАЯ ТАБЛИЦА ДЛЯ ПРЕДОТВРАЩЕНИЯ ПОВТОРНЫХ АКТИВАЦИЙ
         await connection.execute("""
             CREATE TABLE IF NOT EXISTS promo_code_activations (
                 id SERIAL PRIMARY KEY,
@@ -150,8 +144,31 @@ async def on_startup(pool: asyncpg.Pool):
                 UNIQUE(user_id, promo_code_id)
             );
         """)
+        await connection.execute("""
+            CREATE TABLE IF NOT EXISTS ai_usage (
+                id SERIAL PRIMARY KEY,
+                scenario_id INTEGER REFERENCES posting_scenarios(id) ON DELETE SET NULL,
+                tokens_used INTEGER NOT NULL,
+                cost NUMERIC(10, 4) DEFAULT 0.0, -- Добавим поле для стоимости
+                used_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        await connection.execute("""
+            CREATE TABLE IF NOT EXISTS pending_moderation_posts (
+                moderation_id VARCHAR(36) PRIMARY KEY, -- UUID для уникального идентификатора
+                channel_id BIGINT NOT NULL,
+                article_url TEXT NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
     logging.info("Database tables are ready.")
 
+async def on_shutdown(pool: asyncpg.Pool, scheduler):
+    logging.info("Shutting down scheduler...")
+    scheduler.shutdown()
+    logging.info("Closing database connection pool...")
+    await pool.close()
+    logging.info("Database connection pool closed.")
 
 async def main():
     """Основная функция для запуска бота."""
@@ -159,21 +176,35 @@ async def main():
 
     storage = RedisStorage.from_url('redis://redis:6379/0')
 
-    defaults = DefaultBotProperties(parse_mode="HTML")
-    bot = Bot(token=config.BOT_TOKEN, default=defaults)
+    bot = Bot(token=config.BOT_TOKEN, parse_mode="HTML")
     
-    dp = Dispatcher(storage=storage)
+    dp = Dispatcher(storage=storage, parse_mode="HTML")
     dp.update.middleware(ThrottlingMiddleware())
+
+    # Словарь для хранения времени последней записи ошибки
+    last_error_log_time = {}
+    ERROR_LOG_COOLDOWN = 60 # Секунды
+
+    async def on_error(event, error):
+        error_type = type(error).__name__
+        current_time = asyncio.get_event_loop().time()
+
+        if current_time - last_error_log_time.get(error_type, 0) > ERROR_LOG_COOLDOWN:
+            logging.error(f"Необработанное исключение: {error}", exc_info=True)
+            last_error_log_time[error_type] = current_time
+        else:
+            logging.debug(f"Игнорируем повторяющуюся ошибку ({error_type}): {error}")
+
+    dp.errors.register(on_error)
 
     db_pool = await create_db_connection_pool()
     await on_startup(db_pool)
 
     dp['db_pool'] = db_pool
-    scheduler = await setup_scheduler(db_pool)
+    scheduler = await setup_scheduler(dp['db_pool'])
     scheduler.start()
     dp['scheduler'] = scheduler
 
-    # Регистрируем все наши роутеры
     dp.include_router(admin.router)
     dp.include_router(help.router)
     dp.include_router(promo.router)
@@ -183,7 +214,10 @@ async def main():
     dp.include_router(support.router)
     dp.include_router(scenarios.router)
 
+    dp.shutdown.register(functools.partial(on_shutdown, pool=dp['db_pool'], scheduler=dp['scheduler']))
+
     await bot.delete_webhook(drop_pending_updates=True)
+    logging.info("Starting polling...")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
