@@ -30,6 +30,7 @@ XMLRIVER_USER_ID = get_secret("xmlriver_user_id", "18601") # Добавляем 
 OPENROUTER_API_KEY = get_secret("openrouter_api_key")
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL = "google/gemini-2.0-flash-exp:free"
+OPENROUTER_SONAR_MODEL = os.getenv("OPENROUTER_SONAR_MODEL", "perplexity/sonar")
 
 DB_USER = get_secret("db_user")
 DB_PASSWORD = get_secret("db_password")
@@ -42,9 +43,23 @@ DB_HOST = os.getenv("DB_HOST", "db")
 ADMINS = [int(admin_id.strip()) for admin_id in ADMIN_USER_IDS.split(',') if admin_id.strip()]
 
 # --- Константы стоимости --- 
-SEARCH_QUERY_COST = 0.02 # Рублей за один поисковый запрос
-AI_TOKEN_COST_PER_1000 = 0.2 # Рубль за 1000 токенов AI
+# XMLRiver (картинки) — стоимость одного запроса в рублях
+SEARCH_QUERY_COST = float(os.getenv("SEARCH_QUERY_COST", "0.02"))
+
+# Sonar (OpenRouter) — стоимость одного запроса в рублях (по умолчанию 0.5 RUB ≈ $0.005 при курсе ~100)
+SONAR_REQUEST_COST_RUB = float(os.getenv("SONAR_REQUEST_COST_RUB", "0.5"))
+
+# Стоимость токенов моделей через OpenRouter
+# 1 000 000 токенов = 120 рублей => 0.12 руб за 1000 токенов
+AI_TOKEN_COST_PER_1M_RUB = float(os.getenv("AI_TOKEN_COST_PER_1M_RUB", "120"))
+AI_TOKEN_COST_PER_1000 = AI_TOKEN_COST_PER_1M_RUB / 1000.0
 MAX_CHARS_FOR_PASSPORT = 3000 # Максимальное количество символов для "Паспорта стиля" AI
+MAX_TITLE_CHARS = int(os.getenv("MAX_TITLE_CHARS", "120"))
+MAX_BODY_CHARS = int(os.getenv("MAX_BODY_CHARS", "2000"))
+MAX_IMAGE_QUERY_CHARS = int(os.getenv("MAX_IMAGE_QUERY_CHARS", "120"))
+MAX_STYLE_PASSPORT_CHARS = int(os.getenv("MAX_STYLE_PASSPORT_CHARS", "2000"))
+MAX_ACTIVITY_DESCRIPTION_CHARS = int(os.getenv("MAX_ACTIVITY_DESCRIPTION_CHARS", "500"))
+MAX_GENERATION_LANGUAGE_CHARS = int(os.getenv("MAX_GENERATION_LANGUAGE_CHARS", "50"))
 
 XMLRIVER_API_KEY = get_secret("xmlriver_api_key")
 XMLRIVER_NEWS_URL = "http://xmlriver.com/search/xml"

@@ -15,6 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from bot.utils.states import BroadcastState, DirectMessage, PromoCodeCreation
 from bot.utils.localization import get_text
 from bot import config
+from datetime import datetime, timezone
 
 # Фильтр для проверки, является ли пользователь администратором
 class IsAdmin(Filter):
@@ -46,7 +47,14 @@ router.callback_query.filter(IsAdmin())
 
 async def get_admin_keyboard(lang_code: str) -> InlineKeyboardBuilder:
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"))
+    builder.row(InlineKeyboardButton(text="📊 Общая статистика", callback_data="admin_stats"))
+    builder.row(
+        InlineKeyboardButton(text="📅 Статистика за месяц", callback_data="admin_stats_month"),
+        InlineKeyboardButton(text="🧮 За всё время", callback_data="admin_stats_all")
+    )
+    builder.row(
+        InlineKeyboardButton(text="♻️ Обнулить месяц", callback_data="admin_reset_month")
+    )
     builder.row(
         InlineKeyboardButton(text=get_text(lang_code, 'admin_broadcast_button'), callback_data="admin_broadcast"),
         InlineKeyboardButton(text=get_text(lang_code, 'admin_write_to_user_button'), callback_data="admin_direct_message")
@@ -97,6 +105,74 @@ async def admin_stats_handler(callback: CallbackQuery, db_pool: asyncpg.Pool):
     
     await callback.message.edit_text(stats_text, reply_markup=builder.as_markup())
     await callback.answer()
+
+
+async def _format_cost_stats(conn, since_ts: datetime | None):
+    where = "WHERE created_at >= $1" if since_ts else ""
+    params = [since_ts] if since_ts else []
+    # Бесплатные/платные, посты, паспорта, суммы
+    q = f"""
+        SELECT 
+            SUM(CASE WHEN is_free THEN 1 ELSE 0 END) AS free_count,
+            COALESCE(SUM(CASE WHEN is_free THEN (cost_tokens + cost_requests) ELSE 0 END),0) AS free_cost,
+            SUM(CASE WHEN kind='style_passport' THEN 1 ELSE 0 END) AS sp_count,
+            COALESCE(SUM(CASE WHEN kind='style_passport' THEN (cost_tokens + cost_requests) ELSE 0 END),0) AS sp_cost,
+            SUM(CASE WHEN NOT is_free THEN 1 ELSE 0 END) AS paid_count,
+            COALESCE(SUM(CASE WHEN NOT is_free THEN (cost_tokens + cost_requests) ELSE 0 END),0) AS paid_cost,
+            COALESCE(SUM(revenue),0) AS revenue
+        FROM usage_ledger
+        {where}
+    """
+    row = await conn.fetchrow(q, *params)
+    free_count = row['free_count'] or 0
+    free_cost = float(row['free_cost'] or 0)
+    sp_count = row['sp_count'] or 0
+    sp_cost = float(row['sp_cost'] or 0)
+    paid_count = row['paid_count'] or 0
+    paid_cost = float(row['paid_cost'] or 0)
+    revenue = float(row['revenue'] or 0)
+    net_income = revenue - paid_cost - sp_cost - free_cost
+    text = (
+        f"Бесплатные генерации Кол: {free_count} - {free_cost:.0f} рублей\n"
+        f"Генерация паспортов стиля Кол: {sp_count} - {sp_cost:.0f} рублей\n"
+        f"Платные генерации Кол: {paid_count} - {paid_cost:.0f} рублей | Заработок Кол: {paid_count} - {revenue:.0f} рублей\n"
+        f"Итого {revenue:.0f} - {paid_cost:.0f} - {sp_cost:.0f} - {free_cost:.0f} = <b>{net_income:.0f}</b> — Ваш доход учитывая все расходы"
+    )
+    return text
+
+
+@router.callback_query(F.data == "admin_stats_month")
+async def admin_stats_month(callback: CallbackQuery, db_pool: asyncpg.Pool):
+    async with db_pool.acquire() as conn:
+        since = await conn.fetchval("SELECT COALESCE(MAX(reset_at), date_trunc('month', NOW())) FROM usage_resets")
+        text = await _format_cost_stats(conn, since)
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="back_to_admin"))
+    await callback.message.edit_text(f"<b>📅 Статистика за месяц</b>\n\n{text}", reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_stats_all")
+async def admin_stats_all(callback: CallbackQuery, db_pool: asyncpg.Pool):
+    async with db_pool.acquire() as conn:
+        text = await _format_cost_stats(conn, None)
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="⬅️ Назад в админку", callback_data="back_to_admin"))
+    await callback.message.edit_text(f"<b>🧮 Статистика за всё время</b>\n\n{text}", reply_markup=builder.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_reset_month")
+async def admin_reset_month(callback: CallbackQuery, db_pool: asyncpg.Pool, bot: Bot):
+    admin_chat_id = config.ADMINS[0] if config.ADMINS else callback.from_user.id
+    async with db_pool.acquire() as conn:
+        # Отчёт перед обнулением
+        report = await _format_cost_stats(conn, None)
+        await bot.send_message(admin_chat_id, f"<b>📤 Месячный отчёт перед обнулением</b>\n\n{report}")
+        # Фиксируем reset
+        await conn.execute("INSERT INTO usage_resets DEFAULT VALUES")
+    await callback.answer("Обнуление месяца зафиксировано.")
+    await show_admin_panel(callback)
 
 # --- БЛОК РАССЫЛКИ ---
 

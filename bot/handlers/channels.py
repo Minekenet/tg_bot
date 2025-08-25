@@ -454,6 +454,19 @@ async def process_style_passport(callback: CallbackQuery, state: FSMContext, db_
                 "UPDATE channels SET style_passport = $1, style_passport_updated_at = NOW() WHERE channel_id = $2",
                 passport_text, channel_id
             )
+            # Логируем в usage_ledger как расход на паспорт стиля (is_free=true — это наша внутренняя операция)
+            try:
+                cost_per_token = config.AI_TOKEN_COST_PER_1M_RUB / 1_000_000
+                cost_tokens_rub = token_count * cost_per_token
+                await conn.execute(
+                    """
+                    INSERT INTO usage_ledger (user_id, scenario_id, kind, is_free, tokens_used, sonar_requests, image_requests, cost_tokens, cost_requests, revenue)
+                    VALUES ($1, $2, $3, $4, $5, 0, 0, $6, 0, 0)
+                    """,
+                    callback.from_user.id, None, 'style_passport', True, token_count, cost_tokens_rub
+                )
+            except Exception as e:
+                logging.error(f"Не удалось записать usage_ledger для паспорта стиля: {e}", exc_info=True)
         await callback.message.edit_text(
             get_text(lang_code, 'style_passport_created_success', passport_text=passport_text)
         )

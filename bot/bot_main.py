@@ -154,6 +154,28 @@ async def on_startup(pool: asyncpg.Pool):
             );
         """)
         await connection.execute("""
+            CREATE TABLE IF NOT EXISTS usage_ledger (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                scenario_id INTEGER REFERENCES posting_scenarios(id) ON DELETE SET NULL,
+                kind VARCHAR(32) NOT NULL, -- 'post' | 'style_passport'
+                is_free BOOLEAN DEFAULT TRUE,
+                tokens_used INTEGER DEFAULT 0,
+                sonar_requests INTEGER DEFAULT 0,
+                image_requests INTEGER DEFAULT 0,
+                cost_tokens NUMERIC(12,4) DEFAULT 0.0,
+                cost_requests NUMERIC(12,4) DEFAULT 0.0,
+                revenue NUMERIC(12,4) DEFAULT 0.0,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        await connection.execute("""
+            CREATE TABLE IF NOT EXISTS usage_resets (
+                id SERIAL PRIMARY KEY,
+                reset_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        await connection.execute("""
             CREATE TABLE IF NOT EXISTS pending_moderation_posts (
                 moderation_id VARCHAR(36) PRIMARY KEY, -- UUID для уникального идентификатора
                 channel_id BIGINT NOT NULL,

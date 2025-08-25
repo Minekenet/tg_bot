@@ -10,6 +10,14 @@ from bot.utils.localization import get_text # Импортируем здесь,
 OPENROUTER_API_KEY = config.OPENROUTER_API_KEY
 OPENROUTER_API_BASE = config.OPENROUTER_API_BASE
 OPENROUTER_MODEL = config.OPENROUTER_MODEL
+OPENROUTER_SONAR_MODEL = config.OPENROUTER_SONAR_MODEL
+
+MAX_TITLE_CHARS = config.MAX_TITLE_CHARS
+MAX_BODY_CHARS = config.MAX_BODY_CHARS
+MAX_IMAGE_QUERY_CHARS = config.MAX_IMAGE_QUERY_CHARS
+MAX_STYLE_PASSPORT_CHARS = config.MAX_STYLE_PASSPORT_CHARS
+MAX_ACTIVITY_DESCRIPTION_CHARS = config.MAX_ACTIVITY_DESCRIPTION_CHARS
+MAX_GENERATION_LANGUAGE_CHARS = config.MAX_GENERATION_LANGUAGE_CHARS
 
 async def generate_content_robust(prompt: str) -> tuple[bool, str, int]:
     """
@@ -33,6 +41,7 @@ async def generate_content_robust(prompt: str) -> tuple[bool, str, int]:
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.7, # можно настроить
+        "max_tokens": 800
     }
 
     logging.info(f"Отправка запроса к OpenRouter API. Модель: {OPENROUTER_MODEL}")
@@ -104,6 +113,9 @@ async def generate_style_passport_from_text(posts_text: str, lang_code: str) -> 
     
     success, passport_text, token_count = await generate_content_robust(prompt)
     
+    # Логирование в usage_ledger для учета стоимости паспорта стиля (дешевая модель)
+    # Замечание: тут нет db_pool в контексте, поэтому логирование делается в местах вызова,
+    # где db_pool доступен (например, в хендлерах). Эта функция возвращает токены.
     return success, passport_text, token_count
 
 async def select_best_articles_from_search_results(articles: list[dict], lang_code: str) -> tuple[bool, list[str], int]:
@@ -152,3 +164,100 @@ async def select_best_articles_from_search_results(articles: list[dict], lang_co
             return False, [], token_count
     else:
         return False, [], token_count
+
+
+async def generate_post_via_sonar(theme: str, keywords: list[str], lang_code: str,
+                                  style_passport: str = "",
+                                  activity_description: str = "",
+                                  generation_language: str = "") -> tuple[bool, dict, int]:
+    """
+    Использует Perplexity Sonar через OpenRouter для поиска свежей новости (<=12 часов)
+    по теме и тегам, и генерирует готовый пост. Возвращает (success, data, tokens),
+    где data = { title, body, image_query, source_url } с ограничениями по длине.
+    """
+    if not OPENROUTER_API_KEY:
+        logging.critical("КРИТИЧЕСКАЯ ОШИБКА: OPENROUTER_API_KEY не найден. Генерация ИИ невозможна.")
+        return False, {"error": "API key missing"}, 0
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://localhost:3000",
+    }
+
+    # Ограничим длину входных данных на всякий случай
+    safe_theme = (theme or "").strip()[:200]
+    safe_keywords = [k.strip()[:100] for k in (keywords or [])][:10]
+    safe_passport = (style_passport or "").strip()[:MAX_STYLE_PASSPORT_CHARS]
+    safe_activity = (activity_description or "").strip()[:MAX_ACTIVITY_DESCRIPTION_CHARS]
+    safe_generation_lang = (generation_language or lang_code or "ru").strip()[:MAX_GENERATION_LANGUAGE_CHARS]
+
+    # Промпт с жесткими требованиями по свежести и формату
+    locale = "ru" if (safe_generation_lang or "ru").startswith("ru") else "en"
+    instructions = (
+        f"Ты помощник-редактор. Найди в интернете ОДНУ актуальную новость, опубликованную не ранее чем 12 часов назад, "
+        f"по теме и ключевым словам. Верни строго JSON без пояснений. Язык ответа: {locale}.\n\n"
+        f"Тема: {safe_theme}\n"
+        f"Ключевые слова: {', '.join(safe_keywords)}\n"
+        f"Паспорт стиля: {safe_passport}\n"
+        f"Описание канала/деятельности: {safe_activity}\n"
+        f"Язык генерации: {safe_generation_lang}\n\n"
+        f"Требования:\n"
+        f"- Источник должен быть текстовая статья, не видео.\n"
+        f"- Дата публикации должна быть в пределах последних 12 часов. Игнорируй результаты старше.\n"
+        f"- Проверь реальность источника (известные СМИ/блоги).\n"
+        f"- Сгенерируй структурированный пост.\n"
+        f"- Соблюдай лимиты символов.\n\n"
+        f"Формат JSON строго такой:\n"
+        f"{{\n"
+        f"  \"title\": string (<= {MAX_TITLE_CHARS} chars),\n"
+        f"  \"body\": string (<= {MAX_BODY_CHARS} chars),\n"
+        f"  \"image_query\": string (<= {MAX_IMAGE_QUERY_CHARS} chars),\n"
+        f"  \"source_url\": string (valid URL to the article)\n"
+        f"}}\n\n"
+        f"Правила оформления:\n"
+        f"- title — короткий, цепляющий, без эмодзи.\n"
+        f"- body — информативно и лаконично, без воды и клише.\n"
+        f"- image_query — краткий запрос для поиска иллюстрации по теме новости.\n"
+        f"- Не выходи за лимиты символов. Если нужно — укорачивай.\n"
+        f"- Верни ТОЛЬКО JSON."
+    )
+
+    payload = {
+        "model": OPENROUTER_SONAR_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are Perplexity Sonar web search assistant."},
+            {"role": "user", "content": instructions}
+        ],
+        "temperature": 0.2,
+        "max_tokens": 800
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{OPENROUTER_API_BASE}/chat/completions", headers=headers, json=payload, timeout=60) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    token_count = data.get("usage", {}).get("total_tokens", 0)
+                    # Попытка распарсить JSON из ответа
+                    try:
+                        parsed = json.loads(content)
+                        # Принудительно режем по лимитам
+                        parsed["title"] = (parsed.get("title") or "")[:MAX_TITLE_CHARS]
+                        parsed["body"] = (parsed.get("body") or "")[:MAX_BODY_CHARS]
+                        parsed["image_query"] = (parsed.get("image_query") or "")[:MAX_IMAGE_QUERY_CHARS]
+                        return True, parsed, token_count
+                    except Exception:
+                        logging.error(f"Sonar вернул не-JSON: {content}")
+                        return False, {"error": "Non-JSON from Sonar"}, token_count
+                else:
+                    error_text = await response.text()
+                    logging.error(f"Ошибка Sonar(OpenRouter) API: Статус {response.status}, Тело: {error_text}")
+                    return False, {"error": error_text}, 0
+    except aiohttp.ClientError as e:
+        logging.critical(f"Сетевая ошибка Sonar(OpenRouter): {e}", exc_info=True)
+        return False, {"error": str(e)}, 0
+    except Exception as e:
+        logging.critical(f"Исключение при генерации через Sonar: {e}", exc_info=True)
+        return False, {"error": str(e)}, 0

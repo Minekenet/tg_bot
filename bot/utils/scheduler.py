@@ -19,10 +19,12 @@ from bot.utils.subscription_check import has_generations, decrement_generation_l
 from bot.utils.search_engine import search_news
 from bot.utils.image_handler import find_creative_commons_image_url
 from bot.utils.article_parser import get_article_text
+from bot.utils.ai_generator import generate_post_via_sonar
 from bot.keyboards.inline import get_moderation_keyboard
 from bot.utils.localization import get_text, escape_html
-from bot.config import SEARCH_QUERY_COST, AI_TOKEN_COST_PER_1000, BOT_TOKEN
+from bot.config import SEARCH_QUERY_COST, AI_TOKEN_COST_PER_1000, BOT_TOKEN, SONAR_REQUEST_COST_RUB, AI_TOKEN_COST_PER_1M_RUB
 from bot.utils.ai_generator import generate_content_robust, select_best_articles_from_search_results
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,8 @@ async def process_scenario_job(scenario_id: int, user_id: int, channel_id: int):
     
     total_ai_tokens = 0
     total_search_queries = 0
+    total_sonar_requests = 0
+    total_image_queries = 0
 
     bot = Bot(token=config.BOT_TOKEN, parse_mode="HTML")
     global db_pool_global # Объявляем, что будем использовать глобальную переменную
@@ -93,94 +97,43 @@ async def process_scenario_job(scenario_id: int, user_id: int, channel_id: int):
             logging.warning(f"Сценарий #{scenario_id}: Сценарий или канал не найдены в БД.")
             return
 
-        # ИЗМЕНЕНО: Логика поиска теперь чистая и правильная
+        # Новый путь: Sonar заменяет поиск и парсинг
         theme = scenario.get('theme', '')
-        keywords = [k.strip() for k in scenario['keywords'].split(',') if k.strip()]
-        
-        # Передаем тему, ключевые слова и ЯЗЫК ИНТЕРФЕЙСА пользователя
-        # XMLRiver всегда возвращает XML, поэтому его нужно сначала распарсить
-        raw_search_results, search_count = await search_news(theme, keywords, user_lang_code)
-        total_search_queries += search_count
+        keywords = [k.strip() for k in (scenario.get('keywords') or '').split(',') if k.strip()]
 
-        if not raw_search_results:
-            logging.info(f"Сценарий #{scenario_id}: Поиск не дал результатов.")
+        success_sonar, sonar_data, tokens_used_sonar = await generate_post_via_sonar(
+            theme,
+            keywords,
+            user_lang_code,
+            style_passport=(channel.get('style_passport') or ''),
+            activity_description=(channel.get('activity_description') or ''),
+            generation_language=(channel.get('generation_language') or user_lang_code or 'ru')
+        )
+        total_ai_tokens += tokens_used_sonar
+        total_sonar_requests += 1
+
+        if not success_sonar:
+            logging.info(f"Сценарий #{scenario_id}: Sonar не нашел подходящую свежую новость или вернул ошибку: {sonar_data}")
             await send_message_with_retry(bot, user_id, get_text(user_lang_code, 'no_news_found_job_error', scenario_name=scenario['scenario_name'], escape_html_chars=True))
             return
 
-        # Извлечение данных из XML в удобный формат для ИИ
-        articles_for_ai_selection = []
-        try:
-            root = ET.fromstring(raw_search_results)
-            for doc in root.findall('.//doc'):
-                url = doc.find('url').text if doc.find('url') is not None else None
-                title = doc.find('title').text if doc.find('title') is not None else None
-                # Объединяем все <passage> в один сниппет
-                passages = [p.text for p in doc.findall('passages/passage') if p.text is not None]
-                snippet = " ".join(passages)
+        final_article_url = sonar_data.get('source_url') or ''
+        post_title = sonar_data.get('title') or ''
+        post_body = sonar_data.get('body') or ''
+        image_query = sonar_data.get('image_query') or ''
 
-                if url and title and snippet and not is_video_url(url):
-                    articles_for_ai_selection.append({
-                        "url": url,
-                        "title": title,
-                        "passages": snippet
-                    })
-        except ET.ParseError as e:
-            logging.error(f"Ошибка парсинга XML ответа от XMLRiver: {e}", exc_info=True)
+        if not final_article_url or not (post_title or post_body):
+            logging.warning(f"Сценарий #{scenario_id}: Sonar вернул неполные данные: {sonar_data}")
             await send_message_with_retry(bot, user_id, get_text(user_lang_code, 'generic_error_in_job', escape_html_chars=True))
             return
 
-        if not articles_for_ai_selection:
-            logging.info(f"Сценарий #{scenario_id}: После парсинга XML не осталось статей для выбора.")
-            await send_message_with_retry(bot, user_id, get_text(user_lang_code, 'no_news_found_job_error', scenario_name=scenario['scenario_name'], escape_html_chars=True))
-            return
-
-        # ИИ выбирает 3 лучшие статьи
-        success_ai_selection, selected_urls, tokens_used_selection = await select_best_articles_from_search_results(
-            articles_for_ai_selection, user_lang_code
-        )
-        total_ai_tokens += tokens_used_selection
-
-        if not success_ai_selection or not selected_urls:
-            logging.warning(f"Сценарий #{scenario_id}: ИИ не смог выбрать подходящие статьи. {selected_urls}")
-            await send_message_with_retry(bot, user_id, get_text(user_lang_code, 'error_ai_selection', error="ИИ не смог выбрать подходящие статьи.", escape_html_chars=True))
-            return
-
-        article_text = None
-        final_article_url = None
-        # Пытаемся спарсить текст из статей по порядку
-        for url in selected_urls:
-            try:
-                article_text = await get_article_text(url)
-            except ClientConnectorError as e:
-                logging.error(f"Сценарий #{scenario_id}: Сетевая ошибка при попытке спарсить статью {url}: {e}", exc_info=True)
-                article_text = None # Принудительно устанавливаем None для активации логики обработки ошибки парсинга
-                continue # Пробуем следующую статью
-            except Exception as e:
-                logging.error(f"Сценарий #{scenario_id}: Неизвестная ошибка при парсинге статьи {url}: {e}", exc_info=True)
-                article_text = None # Принудительно устанавливаем None для активации логики обработки ошибки парсинга
-                continue # Пробуем следующую статью
-
-            if article_text:
-                final_article_url = url
-                
-                # Проверка на дубликаты
-                link_hash = hashlib.sha256(final_article_url.encode()).hexdigest()
-                query = "SELECT source_url_hash FROM published_posts WHERE channel_id = $1 AND source_url_hash = $2"
-                already_published = await db_pool.fetchval(query, channel_id, link_hash)
-
-                if not already_published:
-                    logging.info(f"Сценарий #{scenario_id}: Успешно извлечен текст из статьи и она не является дубликатом: {url}")
-                    # Добавляем логирование для извлеченного текста статьи
-                    logging.debug(f"Сценарий #{scenario_id}: Извлеченный текст статьи: {article_text}")
-                    break # Если успешно спарсили и не дубликат, выходим
-                else:
-                    logging.info(f"Сценарий #{scenario_id}: Статья уже была опубликована, пробуем следующую: {url}.")
-                    article_text = None # Сбрасываем, чтобы продолжить поиск
-                    final_article_url = None
-
-        if not article_text or not final_article_url:
-            logging.warning(f"Сценарий #{scenario_id}: Не удалось извлечь текст ни из одной из 3 выбранных ИИ статей или все они являются дубликатами.")
-            await send_message_with_retry(bot, user_id, get_text(user_lang_code, 'article_parsing_failed_job_error', scenario_name=scenario['scenario_name'], escape_html_chars=True))
+        # Проверка на дубликаты источника
+        link_hash = hashlib.sha256(final_article_url.encode()).hexdigest()
+        query = "SELECT source_url_hash FROM published_posts WHERE channel_id = $1 AND source_url_hash = $2"
+        already_published = await db_pool.fetchval(query, channel_id, link_hash)
+        if already_published:
+            logging.info(f"Сценарий #{scenario_id}: Выбранная Sonar статья уже была опубликована: {final_article_url}.")
+            await send_message_with_retry(bot, user_id, get_text(user_lang_code, 'no_unique_news_found_job_error', scenario_name=scenario['scenario_name'], escape_html_chars=True))
             return
 
         # Проверка на дубликаты после выбора и парсинга
@@ -195,53 +148,15 @@ async def process_scenario_job(scenario_id: int, user_id: int, channel_id: int):
 
         image_url = None
         channel_generation_language = channel.get('generation_language') or 'ru' # Default to Russian
-        
-        # Генерация финального поста, включая запрос на изображение, если стратегия "Текст + Медиа"
-        generation_prompt = get_text(channel_generation_language, "post_generation_ai_prompt",
-                                     article_text=article_text,
-                                     activity_description=channel.get('activity_description', ''),
-                                     style_passport=channel.get('style_passport', ''),
-                                     selected_url=final_article_url, # Передаем URL в промпт, чтобы ИИ мог его включить
-                                     scenario_theme=scenario.get('theme', ''),
-                                     scenario_keywords=scenario.get('keywords', '')
-                                     )
-        
-        # Добавляем логирование для промпта генерации поста
-        logging.debug(f"Сценарий #{scenario_id}: Промпт для генерации поста (первые 500 символов): {generation_prompt[:500]}...")
-        
-        success_post, post_content_raw, tokens_used_post = await generate_content_robust_with_logging(generation_prompt, scenario_id, channel_generation_language)
-        total_ai_tokens += tokens_used_post
 
-        if not success_post:
-            await send_message_with_retry(bot, user_id, get_text(user_lang_code, 'error_ai_generation', error=post_content_raw, escape_html_chars=True))
-            return # НЕ СПИСЫВАЕМ ГЕНЕРАЦИЮ, ЕСЛИ ПОСТ НЕ СГЕНЕРИРОВАН
-
-        # Парсим JSON-ответ от ИИ
-        post_title = ""
-        post_body = ""
-        image_query = ""
-        try:
-            post_data = json.loads(post_content_raw)
-            post_title = post_data.get('title', '')
-            post_body = post_data.get('body', '')
-            # Извлекаем запрос на изображение, если он есть
-            image_query = post_data.get('image_query', '')
-            
-            # Если заголовок или тело пусты, логируем ошибку и используем необработанный текст
-            if not post_title or not post_body:
-                logging.warning(f"Сценарий #{scenario_id}: JSON от ИИ не содержит полей 'title' или 'body'. Используем необработанный текст.")
-                post_text = post_content_raw # Используем необработанный текст, если JSON неполный
-                post_title = "" # Сбрасываем заголовок
-            else:
-                post_text = f"<b>{post_title}</b>\n\n{post_body}"
-        except json.JSONDecodeError as e:
-            logging.error(f"Сценарий #{scenario_id}: Ошибка парсинга JSON ответа от ИИ: {e}. Используем необработанный текст: {post_content_raw}", exc_info=True)
-            post_text = post_content_raw # Используем необработанный текст при ошибке парсинга
+        # Теперь пост уже сгенерирован Sonar, только формируем финальный текст
+        post_text = f"<b>{post_title}</b>\n\n{post_body}" if post_title else post_body
 
         # Если стратегия "Текст + Медиа" и ИИ сгенерировал запрос изображения, ищем изображение
         if scenario['media_strategy'] == 'text_plus_media' and image_query:
             logging.debug(f"Сценарий #{scenario_id}: Сгенерированный запрос для изображения: {image_query}")
             image_url = await find_creative_commons_image_url(image_query, channel_generation_language)
+            total_image_queries += 1 if image_url is not None else 1
             if not image_url:
                 logging.warning(f"Сценарий #{scenario_id}: Не удалось найти изображение для запроса: {image_query}")
         elif scenario['media_strategy'] == 'text_plus_media' and not image_query:
@@ -249,6 +164,23 @@ async def process_scenario_job(scenario_id: int, user_id: int, channel_id: int):
 
         # Если все успешно, списываем генерацию
         await decrement_generation_limit(user_id, db_pool) # Переносим сюда
+
+        # Логируем расходы/доходы в ledger
+        try:
+            # Стоимость токенов: 1,000,000 токенов = 120 руб => 0.00012 руб/токен
+            cost_per_token = 120 / 1_000_000
+            cost_tokens_rub = total_ai_tokens * cost_per_token
+            # Стоимость запросов: SEARCH_QUERY_COST за каждый поисковый/картинковый запрос
+            cost_requests_rub = (total_search_queries + total_image_queries) * SEARCH_QUERY_COST
+            await db_pool.execute(
+                """
+                INSERT INTO usage_ledger (user_id, scenario_id, kind, is_free, tokens_used, sonar_requests, image_requests, cost_tokens, cost_requests, revenue)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                """,
+                user_id, scenario_id, 'post', True, total_ai_tokens, total_search_queries, total_image_queries, cost_tokens_rub, cost_requests_rub, 0
+            )
+        except Exception as e:
+            logging.error(f"Не удалось записать usage_ledger: {e}", exc_info=True)
         logging.info(f"Сценарий #{scenario_id}: Генерация успешно списана с пользователя {user_id}.")
 
         # Экранируем текст поста для HTML перед отправкой
@@ -300,8 +232,10 @@ async def process_scenario_job(scenario_id: int, user_id: int, channel_id: int):
             await db_pool_global.close()
             db_pool_global = None # Сбрасываем глобальную переменную
         await bot.session.close()
-        total_cost = (total_ai_tokens / 1000) * AI_TOKEN_COST_PER_1000 + (total_search_queries * SEARCH_QUERY_COST)
-        logging.info(f"Сценарий #{scenario_id}: ИТОГО: {total_ai_tokens} токенов AI, {total_search_queries} поисковых запросов. Затраты: {total_cost:.2f} руб.")
+        total_cost = (total_ai_tokens / 1000) * AI_TOKEN_COST_PER_1000 \
+            + (total_sonar_requests * SONAR_REQUEST_COST_RUB) \
+            + ((total_search_queries + total_image_queries) * SEARCH_QUERY_COST)
+        logging.info(f"Сценарий #{scenario_id}: ИТОГО: {total_ai_tokens} токенов AI, {total_sonar_requests} Sonar-запросов, {total_search_queries} поисковых запросов, {total_image_queries} запросов изображений. Затраты: {total_cost:.2f} руб.")
         logging.info(f"--- ЗАДАЧА ДЛЯ СЦЕНАРИЯ #{scenario_id} ЗАВЕРШЕНА ---")
 
 db_pool_global: asyncpg.Pool = None # Глобальная переменная для пула DB
