@@ -75,7 +75,8 @@ async def process_support_message(message: Message, state: FSMContext, bot: Bot)
             print(f"Не удалось отправить обращение админу {admin_id}: {e}")
 
     await message.answer(get_text(lang_code, 'support_message_sent_success'))
-    await state.clear()
+    # Не очищаем состояние, позволяем пользователю задать уточняющий вопрос.
+    await state.set_state(SupportRequest.waiting_for_message)
 
 # Шаг 3: Админ нажимает "Ответить пользователю"
 @router.callback_query(F.data.startswith("admin_reply_to_"))
@@ -112,7 +113,8 @@ async def send_reply_to_user(message: Message, state: FSMContext, bot: Bot):
     except Exception as e:
         await message.answer(f"❌ Не удалось отправить ответ пользователю <code>{user_id}</code>. Возможно, он заблокировал бота.\nОшибка: {e}")
     
-    await state.clear()
+    # Оставляем состояние ожидания ответа администратора, чтобы он мог написать ещё одно сообщение
+    await state.set_state(SupportRequest.waiting_for_reply_from_admin)
 
 # ИСПРАВЛЕНО: Отмена запроса в техподдержку теперь возвращает в главное меню.
 @router.callback_query(F.data == "cancel_support_request")

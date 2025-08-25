@@ -16,6 +16,7 @@ from bot import config
 from bot.utils.localization import get_text, escape_html
 from bot.utils.states import ScenarioCreation, ScenarioEditing
 from bot.utils.validation import sanitize_text, is_valid_name, is_valid_keyword
+from bot.config import MIN_SCENARIO_INTERVAL_MINUTES
 from bot.keyboards.inline import (
     get_scenarios_menu_keyboard, 
     get_media_strategy_keyboard, get_manage_scenario_keyboard, get_confirmation_keyboard,
@@ -165,8 +166,21 @@ async def process_time_addition(message: Message, state: FSMContext, bot: Bot, d
     try:
         time_str = datetime.datetime.strptime(message.text.strip(), "%H:%M").strftime("%H:%M")
         if time_str not in times:
-            times.append(time_str)
-            await state.update_data(run_times=sorted(times))
+            # Проверка минимального интервала
+            def to_minutes(ts: str) -> int:
+                h, m = map(int, ts.split(':'))
+                return h * 60 + m
+            proposed = sorted(times + [time_str])
+            valid = True
+            for i in range(1, len(proposed)):
+                if to_minutes(proposed[i]) - to_minutes(proposed[i-1]) < MIN_SCENARIO_INTERVAL_MINUTES:
+                    valid = False
+                    break
+            if valid:
+                times.append(time_str)
+                await state.update_data(run_times=sorted(times))
+            else:
+                await message.reply(get_text(lang_code, 'times_too_close_error', minutes=MIN_SCENARIO_INTERVAL_MINUTES, escape_html_chars=True))
     except ValueError: pass
     await message.delete()
     times_list_str = "\n".join([f"• {t}" for t in sorted(times)])
@@ -400,8 +414,22 @@ async def process_time_edit_addition(message: Message, state: FSMContext, bot: B
     lang_code = await get_user_language(message.from_user.id, db_pool); data = await state.get_data(); times = data.get('run_times', [])
     try:
         time_str = datetime.datetime.strptime(message.text.strip(), "%H:%M").strftime("%H:%M")
-        if time_str not in times: times.append(time_str)
-        await state.update_data(run_times=sorted(times))
+        if time_str not in times:
+            # Проверка минимального интервала
+            def to_minutes(ts: str) -> int:
+                h, m = map(int, ts.split(':'))
+                return h * 60 + m
+            proposed = sorted(times + [time_str])
+            valid = True
+            for i in range(1, len(proposed)):
+                if to_minutes(proposed[i]) - to_minutes(proposed[i-1]) < MIN_SCENARIO_INTERVAL_MINUTES:
+                    valid = False
+                    break
+            if valid:
+                times.append(time_str)
+                await state.update_data(run_times=sorted(times))
+            else:
+                await message.reply(get_text(lang_code, 'times_too_close_error', minutes=MIN_SCENARIO_INTERVAL_MINUTES, escape_html_chars=True))
     except ValueError: pass
     await message.delete()
     times_list_str = "\n".join([f"• {t}" for t in sorted(times)]) if times else get_text(lang_code, 'not_set', escape_html_chars=True)

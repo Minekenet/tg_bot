@@ -23,5 +23,7 @@ async def help_command_handler(message: Message, db_pool: asyncpg.Pool):
     
     # Получаем текст справки из файла локализации
     help_text = get_text(lang_code, 'help_command_text')
+    # Добавим подсказку о смене языка
+    help_text += "\n\n/lang — сменить язык интерфейса"
     
     await message.answer(help_text)

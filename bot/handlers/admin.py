@@ -418,32 +418,75 @@ async def process_promo_uses(message: Message, state: FSMContext, db_pool: async
 # --- Обработчик для проверки "здоровья" бота ---
 @router.message(Command("health"))
 async def health_check_handler(message: Message, db_pool: asyncpg.Pool, scheduler: AsyncIOScheduler):
-    db_status = "❌ Ошибка"
-    db_error = ""
-    scheduler_status = "❌ Ошибка"
-    
+    # 1) Проверка БД
+    db_status = "❌ Ошибка"; db_error = ""; db_stats = ""
     try:
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
+            total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+            total_channels = await conn.fetchval("SELECT COUNT(*) FROM channels")
+            active_scenarios = await conn.fetchval("SELECT COUNT(*) FROM posting_scenarios WHERE is_active = TRUE")
+            pending_mod = await conn.fetchval("SELECT COUNT(*) FROM pending_moderation_posts")
         db_status = "✅ OK"
+        db_stats = (
+            f"Пользователи: <b>{total_users}</b> | Каналы: <b>{total_channels}</b> | Активные сценарии: <b>{active_scenarios}</b> | На модерации: <b>{pending_mod}</b>"
+        )
     except Exception as e:
         db_error = str(e)
         logging.error(f"Health Check: DB connection failed: {e}")
 
+    # 2) Планировщик
     try:
         if scheduler.running:
             scheduler_status = "✅ OK (запущен)"
         else:
             scheduler_status = "⚠️ Внимание (остановлен)"
+        jobs = scheduler.get_jobs()
+        jobs_count = len(jobs)
+        next_runs = sorted([j.next_run_time for j in jobs if getattr(j, 'next_run_time', None)])[:5]
+        next_runs_str = "\n".join([f"• {nr.isoformat()}" for nr in next_runs]) if next_runs else "—"
     except Exception as e:
         scheduler_status = f"❌ Ошибка: {e}"
+        jobs_count = 0
+        next_runs_str = "—"
 
+    # 3) Ключи и конфиг стоимостей (без внешних запросов)
+    has_or = bool(config.OPENROUTER_API_KEY)
+    has_xr = bool(config.XMLRIVER_API_KEY)
+    costs = (
+        f"Токены: <b>{config.AI_TOKEN_COST_PER_1M_RUB} руб/1M</b> | Sonar: <b>{config.SONAR_REQUEST_COST_RUB} руб/запрос</b> | Изобр.: <b>{config.SEARCH_QUERY_COST} руб/запрос</b>"
+    )
+
+    # 4) Последние расходы (за 24ч), если таблица есть
+    usage_24h = "—"
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT COALESCE(SUM(cost_tokens + cost_requests),0) AS cost,
+                       COALESCE(SUM(revenue),0) AS revenue,
+                       COUNT(*) AS cnt
+                FROM usage_ledger
+                WHERE created_at >= NOW() - INTERVAL '24 hours'
+                """
+            )
+            usage_24h = f"Операций: <b>{row['cnt']}</b> | Расходы: <b>{float(row['cost'] or 0):.2f} руб</b> | Выручка: <b>{float(row['revenue'] or 0):.2f} руб</b>"
+    except Exception:
+        pass
+
+    # 5) Формирование отчета
     health_report = (
         "<b>🩺 Отчет о состоянии бота</b>\n\n"
-        f"<b>База данных (PostgreSQL):</b> {db_status}\n"
-        f"<b>Планировщик (APScheduler):</b> {scheduler_status}\n"
+        f"<b>База данных:</b> {db_status}\n"
+        f"{db_stats}\n\n"
+        f"<b>Планировщик:</b> {scheduler_status}\n"
+        f"Задач: <b>{jobs_count}</b>\n"
+        f"Ближайшие запуски:\n{next_runs_str}\n\n"
+        f"<b>Ключи/интеграции:</b> OpenRouter: {'✅' if has_or else '❌'} | XMLRiver: {'✅' if has_xr else '❌'}\n"
+        f"<b>Стоимости:</b> {costs}\n\n"
+        f"<b>Последние 24ч:</b> {usage_24h}"
     )
     if db_error:
-        health_report += f"\n<i>Подробности ошибки БД:</i> <pre>{db_error}</pre>"
+        health_report += f"\n\n<i>Подробности ошибки БД:</i> <pre>{db_error}</pre>"
 
     await message.answer(health_report)

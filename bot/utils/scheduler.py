@@ -22,7 +22,7 @@ from bot.utils.article_parser import get_article_text
 from bot.utils.ai_generator import generate_post_via_sonar
 from bot.keyboards.inline import get_moderation_keyboard
 from bot.utils.localization import get_text, escape_html
-from bot.config import SEARCH_QUERY_COST, AI_TOKEN_COST_PER_1000, BOT_TOKEN, SONAR_REQUEST_COST_RUB, AI_TOKEN_COST_PER_1M_RUB
+from bot.config import SEARCH_QUERY_COST, AI_TOKEN_COST_PER_1000, BOT_TOKEN, SONAR_REQUEST_COST_RUB, AI_TOKEN_COST_PER_1M_RUB, MIN_SCENARIO_INTERVAL_MINUTES
 from bot.utils.ai_generator import generate_content_robust, select_best_articles_from_search_results
 from decimal import Decimal
 
@@ -244,7 +244,24 @@ def add_job_to_scheduler(scheduler: AsyncIOScheduler, scenario: dict):
     if not scenario.get('run_times'): return
     
     times = [t.strip() for t in scenario['run_times'].split(',') if t.strip()]
-    for t in times:
+
+    # Фильтруем времена, чтобы минимальный интервал между ними был не меньше MIN_SCENARIO_INTERVAL_MINUTES
+    unique_sorted = []
+    def to_minutes(ts: str) -> int:
+        h, m = map(int, ts.split(':'))
+        return h * 60 + m
+    for t in sorted(times, key=lambda x: to_minutes(x)):
+        if not unique_sorted:
+            unique_sorted.append(t)
+        else:
+            prev_m = to_minutes(unique_sorted[-1])
+            cur_m = to_minutes(t)
+            if cur_m - prev_m >= MIN_SCENARIO_INTERVAL_MINUTES:
+                unique_sorted.append(t)
+            else:
+                logging.warning(f"Пропущено время запуска '{t}' для сценария #{scenario['id']} — интервал меньше {MIN_SCENARIO_INTERVAL_MINUTES} минут")
+
+    for t in unique_sorted:
         try:
             hour, minute = map(int, t.split(':'))
             job_id = f"scenario_{scenario['id']}_{hour}_{minute}"
